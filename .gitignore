@@ -1,3 +1,6 @@
 data/
 .radar_ml/
-check_gpu.py
+scripts/check_gpu.py
+TODO.md
+results/
+__pycache__/
