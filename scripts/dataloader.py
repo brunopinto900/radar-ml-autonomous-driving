@@ -3,8 +3,11 @@ import json
 from pathlib import Path
 
 import h5py
+import matplotlib
 import numpy as np
 import pandas as pd
+
+matplotlib.use("Agg")  # headless: these scripts only ever save plots, never show them
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_ROOT = PROJECT_ROOT / "data/RadarScenes/RadarScenes/data"
@@ -24,6 +27,33 @@ LABELS = {
     9: ("animal", "tab:olive"),
     10: ("other_dynamic", "magenta"),
     11: ("static", "tab:gray"),
+}
+
+# Reduced training classes, matching radar_scenes.labels.ClassificationLabel (the
+# official package's own recommended grouping). None = dropped, not trained on.
+# See DESIGN_DECISIONS.md for the reasoning.
+CLASS_GROUPS = {
+    "car": "car",
+    "large_vehicle": "large_vehicle",
+    "truck": "large_vehicle",
+    "bus": "large_vehicle",
+    "train": "large_vehicle",
+    "bicycle": "two_wheeler",
+    "motorized_two_wheeler": "two_wheeler",
+    "pedestrian": "pedestrian",
+    "pedestrian_group": "pedestrian_group",
+    "animal": None,
+    "other_dynamic": None,
+    "static": "static",
+}
+
+GROUP_COLORS = {
+    "car": "tab:red",
+    "large_vehicle": "tab:orange",
+    "two_wheeler": "tab:purple",
+    "pedestrian": "tab:green",
+    "pedestrian_group": "lime",
+    "static": "tab:gray",
 }
 
 # sensor_id -> mounting position name, per sensors.json (x=3.86, y=-0.7 for sensor 2)
