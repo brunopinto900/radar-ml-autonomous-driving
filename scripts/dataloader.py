@@ -26,6 +26,14 @@ LABELS = {
     11: ("static", "tab:gray"),
 }
 
+# sensor_id -> mounting position name, per sensors.json (x=3.86, y=-0.7 for sensor 2)
+SENSOR_NAMES = {2: "front right"}
+
+
+def sensor_label(sensor_id: int) -> str:
+    name = SENSOR_NAMES.get(sensor_id)
+    return f"sensor #{sensor_id} ({name})" if name else f"sensor #{sensor_id}"
+
 
 def load_scene(sequence_name: str, timestamp: int | None = None) -> np.ndarray:
     """Load radar detections for one scene (one radar measurement) of a sequence.
@@ -97,9 +105,9 @@ def largest_object(detections: np.ndarray) -> bytes | None:
 
 
 def axis_limits(detections: np.ndarray, pad: float = 2.0) -> tuple[tuple[float, float], tuple[float, float]]:
-    """(xlim, ylim) covering a scene's full extent, for sharing across plots."""
-    xlim = (detections["y_cc"].min() - pad, detections["y_cc"].max() + pad)
-    ylim = (detections["x_cc"].min() - pad, detections["x_cc"].max() + pad)
+    """(xlim, ylim) covering a scene's full extent plus the sensor at the origin."""
+    xlim = (min(detections["y_cc"].min(), 0) - pad, max(detections["y_cc"].max(), 0) + pad)
+    ylim = (min(detections["x_cc"].min(), 0) - pad, max(detections["x_cc"].max(), 0) + pad)
     return xlim, ylim
 
 
@@ -211,6 +219,9 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
     detections = load_scene(sequence_name, timestamp)
     print(f"Loaded {len(detections)} detections from {sequence_name} @ {timestamp}")
 
+    # a scene is always one sensor's measurement, so sensor_id is constant across all its detections
+    sensor_str = sensor_label(int(detections["sensor_id"][0]))
+
     RESULTS_DIR.mkdir(exist_ok=True)
     scene_plot_path = RESULTS_DIR / "scene_plot.png"
     object_attrs_path = RESULTS_DIR / "object_attributes.png"
@@ -218,7 +229,7 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
     xlim, ylim = axis_limits(detections)
     plot_scene(
         detections,
-        title=f"{sequence_name} - one radar scan",
+        title=f"{sequence_name} - one radar scan - {sensor_str}",
         path=scene_plot_path,
         image_path=scene_image_path(sequence_name, timestamp),
         xlim=xlim,
@@ -240,7 +251,7 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
 
     plot_object_attributes(
         obj,
-        title=f"{label_name} ({track_id.decode()[:8]}) - {len(obj)} points",
+        title=f"{label_name} ({track_id.decode()[:8]}) - {len(obj)} points - {sensor_str}",
         path=object_attrs_path,
         xlim=xlim,
         ylim=ylim,
@@ -251,4 +262,4 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
 
 
 if __name__ == "__main__":
-    inspect_scene("sequence_1", 156947099838)
+    inspect_scene("sequence_1", 156881852889)  # sensor_id=2 (front-right), matches build_points_table.py
