@@ -284,6 +284,24 @@ their Cartesian coordinates (their quote: *"the object shape in Cartesian coordi
 independent of the distance between the object and the radar sensor"*), just applied without
 needing their upstream tracker since we already have `track_id` for training-time grouping.
 
+**Mechanism, concretely, using azimuth as the example (`azimuth_sc` vs. `azimuth_rel`):**
+`azimuth_sc` is the point's raw angular position as measured by the sensor - an absolute
+bearing in the sensor's own frame. Histogramming raw `azimuth_sc` per instance bins those
+absolute bearings - and since one object's own angular footprint is only a few points wide
+compared to the sensor's full ~140° FOV, essentially every point in an instance lands in the
+same 1-2 bins, wherever that object happened to be in the FOV. That's *where the object is*,
+not what it looks like - the "degenerates to a single-bin spike" problem above.
+`azimuth_rel[i] = azimuth_sc[i] - mean(azimuth_sc over the instance)` re-centers every point on
+the *instance's own average bearing* instead of the sensor's zero. What's left after
+subtracting that instance-specific reference is each point's deviation from its own object's
+center - i.e. the object's own angular width, independent of where in the FOV it was. This is
+the general recipe behind every `_rel` feature in this section: subtract the instance's own
+central tendency (mean, or median for `vr_rel` - see below) from each raw value, then histogram
+what's left. "Spread" is exactly that residual distribution's shape - concentrated near zero
+across few bins means points barely disagree with each other (tight/rigid), spread across many
+bins further from zero means points disagree a lot (wide/articulated or, per the correction
+above, orientation-dependent).
+
 `results/instance_histograms/{rcs,vr,range,azimuth,x,y,extent}_rel_instance_examples.png`.
 
 - **`x_rel`/`y_rel`/`azimuth_rel`: this works.** Once centered on the object's own centroid,
@@ -313,19 +331,48 @@ De-meaning `vr_compensated` per instance should recover Doppler *spread* (the mi
 signal from item #4) as a full histogram shape instead of a single `vr_std`/`vr_mad` scalar -
 but the first two versions were both broken, for different reasons.
 
-1. **Aliasing outliers, even after de-meaning.** Centering on the instance's own *mean*
-   doesn't fix the item #4 aliasing problem - a single wrapped-around point still pulls that
-   mean and still shows up as a spurious far-flung bin (`large_vehicle` showed isolated spikes
-   at -13 and +18 m/s in the first pass). Same fix as item #4's `std`-vs-`MAD` recommendation:
-   switched the centering from mean to **median** (`CENTERING = {"vr_rel": "median"}` in
-   `instance_histograms.py`), which resists a single outlier point far better.
-2. **Bin width too coarse to show the real signal, even after fixing #1.** The global
-   percentile-based bin range (~-15 to +30 m/s, set by the dataset's genuine wide-spread
-   outliers) put ~5.6 m/s in every one of the 8 bins - but item #4's real class gap is
-   sub-1-m/s (`car` median 0.08 vs. `pedestrian` median 0.52), so everything piled into the
-   center bin regardless of true spread. Fixed with an explicit range override
+1. **Aliasing outliers, even after de-meaning - one bad point corrupts the whole instance, not
+   just itself.** Centering on the instance's own *mean* doesn't fix the item #4 aliasing
+   problem, it spreads it. Example: a `car` instance's true velocities are
+   `[-2, -3, -2.5, -2, -3]` (tight, rigid, mean ≈ -2.5). If one point is actually aliased and
+   reads `+18` instead of its true value, the set becomes `[-2, -3, -2.5, -2, +18]` and the
+   mean jumps to `+2.1`. Subtracting that corrupted mean from *every point* turns the four
+   genuinely tight points - which should de-mean to ~0 - into `-4.1, -5.1, -4.6, -4.1`: a
+   perfectly rigid instance now looks like a widely-dispersed, articulated one. One aliased
+   point didn't just corrupt its own value, it dragged the reference point for the whole
+   instance (`large_vehicle` showed isolated spikes at -13 and +18 m/s in the first pass,
+   consistent with this). Same fix as item #4's `std`-vs-`MAD` recommendation: switched the
+   centering from mean to **median** (`CENTERING = {"vr_rel": "median"}` in
+   `instance_histograms.py`) - a median barely moves when one of several values is extreme, so
+   for the example above the median stays `-2`, de-meaning gives `[0, -1, -0.5, 0, +20]`: the
+   four good points correctly land near zero, and the corruption stays localized to the one
+   point that actually caused it.
+2. **Bin width too coarse to show the real signal, even after fixing #1 - wider bins mean
+   less resolution, and these were far wider than the signal being measured.** Median-centering
+   stops one bad point from corrupting the *rest of its own instance*, but does nothing about
+   how the bin edges themselves are chosen - those still came from the 0.5th-99.5th percentile
+   of `vr_rel` across the *entire* dataset, genuinely wide (~-15 to +30 m/s) because rare
+   fast-crossing traffic and leftover aliased points elsewhere in ~1M points really do reach
+   that scale. Spread ~45 m/s across 8 bins and each bin is ~5.6 m/s wide. Item #4's real class
+   gap is sub-1-m/s (`car` median std 0.08 vs. `pedestrian` median std 0.52) - the entire gap
+   fits inside half a meter-per-second, so against a 5.6 m/s bin both classes round to
+   "essentially zero, dead center." A `car` instance and a `pedestrian` instance, despite
+   genuinely different physical behavior, would both just show one tall spike in the middle bin
+   - not because the classes don't differ, but because the ruler had centimeter-scale objects
+   marked on a meter-scale ruler. Fixed with an explicit range override
    (`EXPLICIT_RANGES = {"vr_rel": (-3.0, 3.0)}`, same cutoff already used for the `vr_std`
-   scatter in `02g`), giving ~0.75 m/s bins.
+   scatter in `02g`), giving ~0.75 m/s bins - close enough to the real scale of the signal to
+   actually resolve it.
+
+   **Why this would have been dangerous left undetected:** it wouldn't have failed loudly.
+   Training would still converge and reach decent overall accuracy, since `rcs`/`extent_rel`
+   carry real signal on their own - gradient descent would just correctly learn that `vr_rel`'s
+   8 bins carry ~no class-discriminative variance and quietly stop using them, even though
+   Doppler spread is a real, validated, physically-grounded signal. There'd be no obvious
+   symptom pointing at `vr_rel` specifically - just a model somewhat worse than it should be at
+   separating classes that lean on Doppler spread, with the natural (wrong) explanations being
+   "need more data" or "the histogram approach doesn't capture this well," not "one feature's
+   bin width was miscalibrated by ~5x."
 
 **Result after both fixes**: `car` tightly concentrated in the two central bins with
 near-zero mass beyond ±0.75 m/s (rigid body). `large_vehicle` has taller central bins *and* a
@@ -357,9 +404,28 @@ histogram-to-MLP pipeline, out of scope for this sprint.
 
 Genuinely separable as histograms: `rcs`, `extent_rel` (clean, rotation-invariant, but expect
 range-degeneracy at long range per item #3), `vr_rel` with median-centering and the ±3 m/s
-range clip (real signal, still coarse). `x_rel`/`y_rel`/`azimuth_rel` individually work but are
-likely redundant with `extent_rel`'s cleaner single-number version of the same shape signal.
-Raw `range_sc`/`azimuth_sc`/`x_cc`/`y_cc` are dead weight as histograms - degenerate to a
-single-bin spike, no better than their own scalar mean. All of this still depends on
-`track_id`-based grouping at training time, and doesn't solve the real-world clustering gap
-(`TODO.md`'s v2 future work) or the cross-feature-correspondence limitation above.
+range clip (real signal, still coarse).
+
+**Correction: `azimuth_rel` is not redundant with `extent_rel` - they measure different
+things, on purpose.** `extent_rel` is rotation-invariant by construction (distance from
+centroid doesn't change when a rigid object is reoriented), so it answers "how big is this
+object" independent of heading. `azimuth_rel` answers a different question: how much angular
+width the object's silhouette presents to the sensor *right now*, which depends on
+orientation as much as size - a car broadside to the sensor shows a large azimuth spread and
+small range spread; the same car nose-on shows the reverse (its length now runs along range,
+which `azimuth_rel` can't see but `range_rel` would). So `azimuth_rel`/`range_rel` together
+could carry real orientation-relative-to-sensor information that `extent_rel` deliberately
+discards - potentially useful if orientation correlates with class for behavioral reasons
+(e.g. how a `two_wheeler` typically presents itself in traffic vs. a parked/turning `car`).
+That's also exactly the same *scene/behavioral* confound risk already flagged for
+`range_sc`/`x_cc`/`y_cc` in the Day 6 ablation plan - not a fixed physical property of the
+class, a property of how this dataset's scenes happen to be composed. Verdict: keep
+`azimuth_rel`/`range_rel` as real candidates alongside `extent_rel` rather than dropping them
+as redundant, and let the same physics-only-vs-full-feature-set ablation (Day 6) determine
+empirically how much they're contributing versus shortcutting.
+
+Raw `range_sc`/`azimuth_sc`/`x_cc`/`y_cc` (not the `_rel` versions) are still dead weight as
+histograms - degenerate to a single-bin spike, no better than their own scalar mean. All of
+this still depends on `track_id`-based grouping at training time, and doesn't solve the
+real-world clustering gap (`TODO.md`'s v2 future work) or the cross-feature-correspondence
+limitation above.
