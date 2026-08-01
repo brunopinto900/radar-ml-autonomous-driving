@@ -231,3 +231,135 @@ cutoff required).
 `eda_2_rcs_vs_vr_mad_scatter` call in `__main__`) after generating this plot, for the same
 reason `eda_vr_dispersion_robust`/`01d` is commented out - it's slow and not needed again
 until it's time to actually pick the Day 5 feature set.
+
+## Per-instance feature histograms (Day 5 - `scripts/instance_histograms.py`)
+
+Everything above this section works on hand-picked scalar statistics (`mean_rcs`, `vr_std`,
+`extent`, ...). Day 5's actual task is the histogram-encoding scheme itself - the same idea
+Tatarchenko & Rambach use (see `TODO.md` Day 8): instead of a few hand-picked scalars per
+instance, compute a raw-count histogram (K=8 bins) of every point's value for each feature,
+per instance, and let those bins be the model's input vector. This section checks whether
+that representation actually looks separable before committing to it, using a handful of
+example instances per class (`n_points >= 5`, 8 examples per class, seed 42) rather than the
+full dataset - a visual sanity check, not a population-level claim (see item #4's median
+`vr_std`/`vr_mad` table for the population-level numbers this cross-checks against).
+
+Visualization note: showing each of the 8 example instances as its own overlaid step outline
+produced a cluttered stack of many small overlapping rectangles, not a readable shape. Fixed
+by plotting the *mean* histogram (± std across the 8 instances) as solid bars - one clean
+column set per class, with the error bars still showing instance-to-instance variability.
+
+### Raw per-point-value histograms: good for RCS, degenerate for position
+
+`results/instance_histograms/{rcs,vr_compensated,range_sc,azimuth_sc,x_cc,y_cc}_instance_examples.png`.
+
+- **`rcs`**: real payoff. Same-class example instances share a recognizable envelope (`car`
+  peaked -10 to 0 dBsm, `large_vehicle` similar but a longer tail past +20, `pedestrian`/
+  `pedestrian_group` both tight and low, `two_wheeler` most concentrated at the bottom) -
+  different instances of the same class look like variations on one shape, different classes
+  look visually distinct.
+- **`vr_compensated`**: unstable for `car`/`large_vehicle` - the bump sits in a different place
+  along the velocity axis almost every instance, since raw bulk velocity is behavioral (how
+  fast this particular vehicle happened to be going), not structural. `pedestrian`/
+  `pedestrian_group` are tightly and consistently peaked near 0 across every example.
+- **`range_sc`/`azimuth_sc`/`x_cc`**: collapse to a near-single-bin spike within one instance,
+  because one object's own physical footprint (a few meters) is tiny compared to the sensor's
+  ~100m range - only the *location* of the spike varies instance-to-instance, not its shape.
+  A per-instance histogram of a position feature carries essentially the same information as
+  just the scalar mean position would; the histogram encoding buys nothing extra here.
+- **`y_cc`** is the one exception among the position features: the spike location is
+  noticeably more consistent within a class (e.g. nearly all `large_vehicle` examples spike
+  around -5 to -10) than `range_sc`/`x_cc`/`azimuth_sc` are - still a single-bin spike
+  structurally, but a more class-diagnostic one, plausibly reflecting which side of the
+  road/which lane a class tends to occupy relative to this specific sensor.
+
+### The environment-vs-shape problem, and the fix: relative (de-meaned) features
+
+Raised directly: *"we are not really encoding shape, we are just encoding environment"*. Raw
+`range_sc`/`azimuth_sc`/`x_cc`/`y_cc` mostly tell you *where in the world* an object was
+recorded, not what it looks like - same root problem as the point-wise position features
+discussed earlier in this project. Fix: histogram each feature *relative to that instance's
+own mean* instead of the raw/absolute value - the same move Tatarchenko & Rambach make with
+their Cartesian coordinates (their quote: *"the object shape in Cartesian coordinates is
+independent of the distance between the object and the radar sensor"*), just applied without
+needing their upstream tracker since we already have `track_id` for training-time grouping.
+
+`results/instance_histograms/{rcs,vr,range,azimuth,x,y,extent}_rel_instance_examples.png`.
+
+- **`x_rel`/`y_rel`/`azimuth_rel`: this works.** Once centered on the object's own centroid,
+  the spread tracks real physical size - `large_vehicle` clearly widest in both `x_rel` and
+  `y_rel`, `pedestrian` tightest (near-single-spike), `pedestrian_group` visibly wider than
+  lone `pedestrian` (matches item #5's extent numbers), `two_wheeler` narrow. `azimuth_rel`
+  shows the same ordering from an independent (angular, not Cartesian) axis.
+- **`extent_rel`** (`sqrt(x_rel**2 + y_rel**2)`, i.e. each point's distance from the instance's
+  own centroid) was added to make the spatial-extent signal rotation-invariant - `x_rel`/
+  `y_rel` individually are tied to the sensor's own axes, so an object's "spread in x" vs.
+  "spread in y" partly reflects its orientation relative to the sensor, not just its shape.
+  This is the cleanest, best-separated feature in the whole set: `car` peaks 0-1m tapering by
+  3m, `large_vehicle` clearly broadest (real mass out to 6-8m), `pedestrian` a single tight
+  bar at 0-1m, `pedestrian_group` visibly two-bin-wide, `two_wheeler` narrow. Bin width (~1m)
+  is well-matched to the real scale of the signal here, unlike the two issues below.
+  **Caveat inherited, not fixed:** de-meaning removes the *environment* confound but not the
+  *range-degeneracy* one from item #3 - at long range every class's own points still collapse
+  toward a single point regardless of true size, so `extent_rel` should still be expected to
+  wash out for far-away instances.
+- **`rcs_rel`/`range_rel`** included in the same spirit (RCS spread ties to item #1's `bus`/
+  specular-glint observation; range spread could hint at object orientation/aspect angle) but
+  not separately characterized here.
+
+### `vr_rel`: two real bugs caught building it, both fixed
+
+De-meaning `vr_compensated` per instance should recover Doppler *spread* (the micro-Doppler
+signal from item #4) as a full histogram shape instead of a single `vr_std`/`vr_mad` scalar -
+but the first two versions were both broken, for different reasons.
+
+1. **Aliasing outliers, even after de-meaning.** Centering on the instance's own *mean*
+   doesn't fix the item #4 aliasing problem - a single wrapped-around point still pulls that
+   mean and still shows up as a spurious far-flung bin (`large_vehicle` showed isolated spikes
+   at -13 and +18 m/s in the first pass). Same fix as item #4's `std`-vs-`MAD` recommendation:
+   switched the centering from mean to **median** (`CENTERING = {"vr_rel": "median"}` in
+   `instance_histograms.py`), which resists a single outlier point far better.
+2. **Bin width too coarse to show the real signal, even after fixing #1.** The global
+   percentile-based bin range (~-15 to +30 m/s, set by the dataset's genuine wide-spread
+   outliers) put ~5.6 m/s in every one of the 8 bins - but item #4's real class gap is
+   sub-1-m/s (`car` median 0.08 vs. `pedestrian` median 0.52), so everything piled into the
+   center bin regardless of true spread. Fixed with an explicit range override
+   (`EXPLICIT_RANGES = {"vr_rel": (-3.0, 3.0)}`, same cutoff already used for the `vr_std`
+   scatter in `02g`), giving ~0.75 m/s bins.
+
+**Result after both fixes**: `car` tightly concentrated in the two central bins with
+near-zero mass beyond ±0.75 m/s (rigid body). `large_vehicle` has taller central bins *and* a
+real bar out at +1.5 to +2.25 with large error bars - the sub-class mixture signature again
+(`train` dragging a wider tail against an otherwise `car`-like `truck`/`bus`/`large_vehicle`
+population, per item #1). `pedestrian`/`pedestrian_group` both show real mass spread across
+nearly the whole ±2 m/s range, matching the articulated-body hypothesis. `two_wheeler` sits in
+between. That ordering now tracks item #4's MAD numbers reasonably well - still coarser than
+the finest real gaps, but showing real signal instead of hiding it.
+
+### Remaining structural limitation: histograms have no cross-feature correspondence
+
+Not fixed by the relative-feature extension, and not fixable without a different architecture.
+A histogram counts how many points fall in each bin *per feature, independently* - it never
+records that a specific high-RCS point was also the point with the odd velocity, or where on
+the object it physically sat relative to the others. Two objects with identical marginal
+RCS/Doppler distributions but completely different spatial layouts produce identical
+histograms. Tatarchenko & Rambach are explicit that this is a deliberate trade, not an
+oversight (their quote: *"Instead of preserving per-point correspondences between individual
+features as done in DeepReflecs, we replace the raw point clouds with high-level feature
+statistics. The fact that such a seemingly severe transformation does not lead to any
+performance drop... indicates that point-wise correspondences between features may not be
+crucial for the task"*) - evidence from their sensor/task/dataset, not a guarantee it holds
+here. Real shape-preserving alternatives exist (occupancy grids - Lombacher et al., cited in
+the same paper; PointNet-style architectures) but are meaningfully bigger builds than a
+histogram-to-MLP pipeline, out of scope for this sprint.
+
+### Verdict for Day 6
+
+Genuinely separable as histograms: `rcs`, `extent_rel` (clean, rotation-invariant, but expect
+range-degeneracy at long range per item #3), `vr_rel` with median-centering and the ±3 m/s
+range clip (real signal, still coarse). `x_rel`/`y_rel`/`azimuth_rel` individually work but are
+likely redundant with `extent_rel`'s cleaner single-number version of the same shape signal.
+Raw `range_sc`/`azimuth_sc`/`x_cc`/`y_cc` are dead weight as histograms - degenerate to a
+single-bin spike, no better than their own scalar mean. All of this still depends on
+`track_id`-based grouping at training time, and doesn't solve the real-world clustering gap
+(`TODO.md`'s v2 future work) or the cross-feature-correspondence limitation above.
