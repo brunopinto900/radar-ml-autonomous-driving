@@ -36,9 +36,9 @@ def instance_features(df: pd.DataFrame) -> pd.DataFrame:
         label_name=("label_name", "first"),
         class_name=("class_name", "first"),
         n_points=("rcs", "size"),
+        mean_rcs=("rcs", "mean"),
         vr_std=("vr_compensated", "std"),
-        # TEMP: commented out for speed, revert after
-        # vr_mad=("vr_compensated", _mad),
+        # vr_mad=("vr_compensated", _mad),  # TEMP: commented out for speed, revert after
         # vr_q25=("vr_compensated", lambda x: x.quantile(0.25)),
         # vr_q75=("vr_compensated", lambda x: x.quantile(0.75)),
         mean_range=("range_sc", "mean"),
@@ -48,32 +48,36 @@ def instance_features(df: pd.DataFrame) -> pd.DataFrame:
         y_max=("y_cc", "max"),
     ).reset_index()
     feats["extent"] = np.hypot(feats["x_max"] - feats["x_min"], feats["y_max"] - feats["y_min"])
-    # feats["vr_iqr"] = feats["vr_q75"] - feats["vr_q25"]
+    # feats["vr_iqr"] = feats["vr_q75"] - feats["vr_q25"]  # TEMP: commented out with vr_mad above
 
     # std of 1 point is NaN already; MAD/IQR of 1-2 points are ~0 but not NaN (a point can't
     # disagree with itself) - mask all three the same way so "too little data to measure
     # dispersion" isn't silently conflated with "measured zero dispersion" in MAD/IQR only.
     too_few_points = feats["n_points"] < 3
-    feats.loc[too_few_points, ["vr_std"]] = np.nan
+    feats.loc[too_few_points, "vr_std"] = np.nan
     return feats
 
 
-def eda_1_large_vehicle_merge(df: pd.DataFrame, feats: pd.DataFrame) -> None:
+def eda_1_large_vehicle_merge(df: pd.DataFrame, feats: pd.DataFrame, rcs_col: str = "rcs",
+                               suffix: str = "") -> None:
     """Overlay the 4 large_vehicle sub-classes (RCS, Doppler spread, spatial extent), then
-    check the merged large_vehicle group stays separated from the other final classes."""
+    check the merged large_vehicle group stays separated from the other final classes.
+    rcs_col/suffix let this be re-run on range-compensated RCS (see FEATURE_MAP.md) without
+    duplicating the function - pass rcs_col="rcs_range_comp", suffix="_range_comp_rcs"."""
     subclasses = ["train", "truck", "bus", "large_vehicle"]
+    rcs_label = "range-compensated RCS [dB]" if suffix else "RCS [dBsm]"
 
-    subclass_rcs = df.loc[df["label_name"].isin(subclasses), "rcs"]
+    subclass_rcs = df.loc[df["label_name"].isin(subclasses), rcs_col]
     rcs_range = (subclass_rcs.min(), subclass_rcs.max())
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     for name in subclasses:
         color = SUBCLASS_COLORS[name]
         sub_points = df[df["label_name"] == name]
-        axes[0].hist(sub_points["rcs"], bins=30, range=rcs_range, density=True,
+        axes[0].hist(sub_points[rcs_col], bins=30, range=rcs_range, density=True,
                      histtype="step", linewidth=1.8, color=color, label=name)
 
-    axes[0].set_xlabel("RCS [dBsm]")
+    axes[0].set_xlabel(rcs_label)
     axes[0].set_ylabel("density")
     axes[0].set_title("RCS by sub-class (per point)")
     axes[0].legend(fontsize=8)
@@ -92,22 +96,22 @@ def eda_1_large_vehicle_merge(df: pd.DataFrame, feats: pd.DataFrame) -> None:
 
     fig.suptitle("Do the large_vehicle sub-classes actually look alike to radar?")
     fig.tight_layout()
-    path = EDA_DIR / "01a_large_vehicle_subclasses.png"
+    path = EDA_DIR / f"01a_large_vehicle_subclasses{suffix}.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
     classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
-    class_rcs = df.loc[df["class_name"].isin(classes), "rcs"]
+    class_rcs = df.loc[df["class_name"].isin(classes), rcs_col]
     rcs_range = (class_rcs.min(), class_rcs.max())
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     for name in classes:
         color = GROUP_COLORS[name]
         class_points = df[df["class_name"] == name]
-        axes[0].hist(class_points["rcs"], bins=30, range=rcs_range, density=True,
+        axes[0].hist(class_points[rcs_col], bins=30, range=rcs_range, density=True,
                      histtype="step", linewidth=1.8, color=color, label=name)
 
-    axes[0].set_xlabel("RCS [dBsm]")
+    axes[0].set_xlabel(rcs_label)
     axes[0].set_ylabel("density")
     axes[0].set_title("RCS by final class (per point)")
     axes[0].legend(fontsize=8)
@@ -126,7 +130,7 @@ def eda_1_large_vehicle_merge(df: pd.DataFrame, feats: pd.DataFrame) -> None:
 
     fig.suptitle("Is merged large_vehicle still separated from the other final classes?")
     fig.tight_layout()
-    path = EDA_DIR / "01b_merged_vs_other_classes.png"
+    path = EDA_DIR / f"01b_merged_vs_other_classes{suffix}.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
@@ -194,13 +198,29 @@ def eda_vr_dispersion_robust(feats: pd.DataFrame) -> None:
 
 
 AZIMUTH_BINS = [0, 5, 10, 15, 20, 25, 30, 40, 50, 60, 90]
+RANGE_BINS = [0, 10, 20, 30, 40, 50, 60, 80, 100]
 
 
-def eda_2_rcs_vs_azimuth(df: pd.DataFrame) -> None:
+def add_range_compensated_rcs(df: pd.DataFrame) -> pd.DataFrame:
+    """Adds rcs_range_comp: a shared (pooled, all-classes) non-parametric range trend -
+    pooled median RCS per range bin, used as "expected RCS at this range" - subtracted per
+    point. See FEATURE_MAP.md 02e/02f for why (RCS trends with range even within one class,
+    likely CFAR detection-threshold bias) and the caveat (a single pooled trend doesn't fully
+    flatten every class - large_vehicle specifically behaves differently)."""
+    range_bin = pd.cut(df["range_sc"], RANGE_BINS)
+    pooled_median = df["rcs"].groupby(range_bin, observed=True).median()
+    expected_rcs = range_bin.map(pooled_median).astype(float)
+    df = df.copy()
+    df["rcs_range_comp"] = df["rcs"] - expected_rcs
+    return df
+
+
+def eda_2_rcs_vs_azimuth(df: pd.DataFrame, rcs_col: str = "rcs", suffix: str = "") -> None:
     """Median RCS vs. |azimuth_sc| (distance from sensor boresight), one line per final
     class - does the boresight-fading pattern hold for every class, or is it class-specific
     (i.e. a scene-geometry/class-mix confound rather than a sensor gain effect)?"""
     classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    rcs_label = "median range-compensated RCS [dB]" if suffix else "median RCS [dBsm]"
     abs_az_deg = df["azimuth_sc"].abs() * 180 / np.pi
     az_bin = pd.cut(abs_az_deg, AZIMUTH_BINS)
     bin_mids = [interval.mid for interval in az_bin.cat.categories]
@@ -208,16 +228,87 @@ def eda_2_rcs_vs_azimuth(df: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(9, 5))
     for name in classes:
         mask = df["class_name"] == name
-        median_rcs = df.loc[mask, "rcs"].groupby(az_bin[mask], observed=True).median()
+        median_rcs = df.loc[mask, rcs_col].groupby(az_bin[mask], observed=True).median()
         median_rcs = median_rcs.reindex(az_bin.cat.categories)
         ax.plot(bin_mids, median_rcs.to_numpy(), marker="o", color=GROUP_COLORS[name], label=name)
 
     ax.set_xlabel("|azimuth_sc| bin midpoint [deg]")
-    ax.set_ylabel("median RCS [dBsm]")
+    ax.set_ylabel(rcs_label)
     ax.set_title("Median RCS vs. distance from sensor boresight, by final class (per point)")
     ax.legend(fontsize=8)
     fig.tight_layout()
-    path = EDA_DIR / "02a_rcs_vs_azimuth_by_class.png"
+    path = EDA_DIR / f"02a_rcs_vs_azimuth_by_class{suffix}.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_rcs_vs_range_by_class(df: pd.DataFrame) -> None:
+    """Median RCS vs. range_sc, one line per final class (per point) - FEATURE_MAP.md
+    follow-up: does RCS still trend with range *within* a single class, or is the pooled
+    range-RCS gradient (02d) fully explained by different classes sitting at different
+    typical ranges? A flat within-class line means class-mix explains it; a trending line
+    means there's a real per-object measurement effect on top of the class-mix."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    range_bin = pd.cut(df["range_sc"], RANGE_BINS)
+    bin_mids = [interval.mid for interval in range_bin.cat.categories]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for name in classes:
+        mask = df["class_name"] == name
+        median_rcs = df.loc[mask, "rcs"].groupby(range_bin[mask], observed=True).median()
+        median_rcs = median_rcs.reindex(range_bin.cat.categories)
+        ax.plot(bin_mids, median_rcs.to_numpy(), marker="o", color=GROUP_COLORS[name], label=name)
+
+    ax.set_xlabel("range_sc bin midpoint [m]")
+    ax.set_ylabel("median RCS [dBsm]")
+    ax.set_title("Median RCS vs. range, by final class (per point) - within-class trend check")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    path = EDA_DIR / "02e_rcs_vs_range_by_class.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_rcs_range_detrend(df: pd.DataFrame) -> None:
+    """Fit one shared (pooled, all-classes) range trend and subtract it per point, then
+    check: (a) the within-class trend is now flat (confirms the detrend worked), and (b)
+    class separation survives on the residual (confirms detrending didn't destroy signal).
+    Non-parametric on purpose - 02e's curve isn't linear (steep at short range, flattening
+    at long range), so an empirical per-bin median is used as the "expected RCS at this
+    range" instead of assuming a functional form."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    range_bin = pd.cut(df["range_sc"], RANGE_BINS)
+    df = add_range_compensated_rcs(df)
+    residual_rcs = df["rcs_range_comp"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+    bin_mids = [interval.mid for interval in range_bin.cat.categories]
+    for name in classes:
+        mask = df["class_name"] == name
+        median_resid = residual_rcs[mask].groupby(range_bin[mask], observed=True).median()
+        median_resid = median_resid.reindex(range_bin.cat.categories)
+        axes[0].plot(bin_mids, median_resid.to_numpy(), marker="o", color=GROUP_COLORS[name], label=name)
+    axes[0].axhline(0, color="black", linewidth=0.8, linestyle="--")
+    axes[0].set_xlabel("range_sc bin midpoint [m]")
+    axes[0].set_ylabel("median residual RCS [dB]")
+    axes[0].set_title("Residual RCS vs. range, by class - should now be flat")
+    axes[0].legend(fontsize=8)
+
+    resid_range = (residual_rcs.quantile(0.005), residual_rcs.quantile(0.995))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        mask = df["class_name"] == name
+        axes[1].hist(residual_rcs[mask], bins=30, range=resid_range, density=True,
+                     histtype="step", linewidth=1.8, color=color, label=name)
+    axes[1].set_xlabel("residual RCS [dB]")
+    axes[1].set_ylabel("density")
+    axes[1].set_title("Residual RCS by final class - does separation survive?")
+    axes[1].legend(fontsize=8)
+
+    fig.suptitle("Range-detrended RCS (shared pooled trend subtracted per point)")
+    fig.tight_layout()
+    path = EDA_DIR / "02f_rcs_range_detrended.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
@@ -256,7 +347,120 @@ def eda_2_point_count_and_doppler_center(df: pd.DataFrame, feats: pd.DataFrame) 
     print(f"Saved {path}")
 
 
-RANGE_BINS = [0, 10, 20, 30, 40, 50, 60, 80, 100]
+def eda_2_rcs_vs_point_count_scatter(feats: pd.DataFrame, rcs_col: str = "mean_rcs",
+                                      suffix: str = "") -> None:
+    """2D scatter: mean RCS vs. point count, colored by class, per scan - the actual
+    deliverable named in TODO.md's Day 4 line, to eyeball joint separability rather than
+    each feature's marginal distribution alone (which is all the other item #2 plots show)."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    rcs_label = "mean range-compensated RCS per scan [dB]" if suffix else "mean RCS per scan [dBsm]"
+    rng = np.random.default_rng(42)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        sub = feats[feats["class_name"] == name]
+        jitter = rng.uniform(-0.3, 0.3, size=len(sub))  # n_points is discrete - jitter for visibility
+        ax.scatter(sub["n_points"] + jitter, sub[rcs_col], s=6, alpha=0.15,
+                   color=color, label=name, edgecolors="none")
+
+    ax.set_xlabel("n_points per scan (jittered for visibility)")
+    ax.set_ylabel(rcs_label)
+    ax.set_title("Mean RCS vs. point count, by final class (per scan)")
+    legend = ax.legend(fontsize=9, markerscale=4)
+    for lh in legend.legend_handles:
+        lh.set_alpha(1)
+    fig.tight_layout()
+    path = EDA_DIR / f"02c_rcs_vs_point_count_scatter{suffix}.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_rcs_vs_point_count_scatter_by_range(feats: pd.DataFrame, rcs_col: str = "mean_rcs",
+                                               suffix: str = "") -> None:
+    """Same scatter as eda_2_rcs_vs_point_count_scatter (mean RCS vs. point count, per scan),
+    but colored by mean_range instead of class - still a flat 2D scatter, just swapping what
+    the color encodes, to check how much of the class-scatter's overlap is a range effect."""
+    rcs_label = "mean range-compensated RCS per scan [dB]" if suffix else "mean RCS per scan [dBsm]"
+    rng = np.random.default_rng(42)
+    jitter = rng.uniform(-0.3, 0.3, size=len(feats))
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    sc = ax.scatter(feats["n_points"] + jitter, feats[rcs_col], c=feats["mean_range"],
+                     s=6, alpha=0.3, cmap="viridis", edgecolors="none")
+    cbar = fig.colorbar(sc, ax=ax)
+    cbar.set_label("mean_range [m]")
+
+    ax.set_xlabel("n_points per scan (jittered for visibility)")
+    ax.set_ylabel(rcs_label)
+    ax.set_title("Mean RCS vs. point count, colored by range (per scan, all classes pooled)")
+    fig.tight_layout()
+    path = EDA_DIR / f"02d_rcs_vs_point_count_by_range{suffix}.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_rcs_vs_vr_std_scatter(feats: pd.DataFrame) -> None:
+    """2D scatter: mean RCS vs. Doppler spread (vr_std), colored by class, per scan - the two
+    strongest features found across the whole EDA (item #2/FEATURE_MAP.md for RCS, item #4
+    for Doppler spread), checked jointly for the first time. Only scans with n_points >= 3
+    have a defined vr_std (instance_features masks the rest to NaN - see item #4), so this
+    necessarily has fewer points than the RCS-only scatter (02c) - pedestrian especially,
+    given >54% of its scans are single-point."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    # vr_std > 3.0 m/s is essentially all aliasing artifact (item #4/01c) - a real per-scan
+    # spread that high isn't physically plausible for any of these classes, and it stretches
+    # the axis enough to make the actual bulk of the data look misleadingly compressed.
+    valid = feats.dropna(subset=["vr_std"])
+    valid = valid[valid["vr_std"] <= 3.0]
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        sub = valid[valid["class_name"] == name]
+        ax.scatter(sub["vr_std"], sub["mean_rcs"], s=6, alpha=0.15,
+                   color=color, label=name, edgecolors="none")
+
+    ax.set_xlabel("scan Doppler spread, std(vr_compensated) [m/s]")
+    ax.set_ylabel("mean RCS per scan [dBsm]")
+    ax.set_title("Mean RCS vs. Doppler spread, by final class (per scan, n_points >= 3, vr_std <= 3.0 m/s)")
+    legend = ax.legend(fontsize=9, markerscale=4)
+    for lh in legend.legend_handles:
+        lh.set_alpha(1)
+    fig.tight_layout()
+    path = EDA_DIR / "02g_rcs_vs_vr_std_scatter.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_rcs_vs_vr_mad_scatter(feats: pd.DataFrame) -> None:
+    """Same as eda_2_rcs_vs_vr_std_scatter, but vr_mad instead of vr_std - the actual
+    recommended feature (item #4: MAD resists a single aliased point far better than std),
+    checked jointly with RCS the same way. No hardcoded upper cutoff needed here in
+    principle (that was specifically an std/aliasing problem), but still uses a percentile
+    xlim so a handful of remaining extreme values don't squash the axis."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    valid = feats.dropna(subset=["vr_mad"])
+    x_max = valid["vr_mad"].quantile(0.995)
+
+    fig, ax = plt.subplots(figsize=(9, 7))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        sub = valid[valid["class_name"] == name]
+        ax.scatter(sub["vr_mad"], sub["mean_rcs"], s=6, alpha=0.15,
+                   color=color, label=name, edgecolors="none")
+
+    ax.set_xlim(-0.05, x_max)
+    ax.set_xlabel("scan Doppler MAD, MAD(vr_compensated) [m/s]")
+    ax.set_ylabel("mean RCS per scan [dBsm]")
+    ax.set_title("Mean RCS vs. Doppler MAD, by final class (per scan, n_points >= 3 only)")
+    legend = ax.legend(fontsize=9, markerscale=4)
+    for lh in legend.legend_handles:
+        lh.set_alpha(1)
+    fig.tight_layout()
+    path = EDA_DIR / "02h_rcs_vs_vr_mad_scatter.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
 
 
 def eda_3_point_count_and_extent_vs_range(feats: pd.DataFrame) -> None:
@@ -304,9 +508,26 @@ if __name__ == "__main__":
     feats = instance_features(df)
     print(f"{len(feats)} instances")
 
+    df = add_range_compensated_rcs(df)
+    comp_means = df.groupby(["sequence_name", "timestamp", "track_id"])["rcs_range_comp"] \
+        .mean().rename("mean_rcs_comp")
+    feats = feats.merge(comp_means, on=["sequence_name", "timestamp", "track_id"], how="left")
+
     eda_1_large_vehicle_merge(df, feats)
     eda_vr_std_shape(feats)
     # eda_vr_dispersion_robust(feats)  # TEMP: commented out for speed, revert after
     eda_2_rcs_vs_azimuth(df)
+    eda_2_rcs_vs_range_by_class(df)
+    eda_2_rcs_range_detrend(df)
     eda_2_point_count_and_doppler_center(df, feats)
+    eda_2_rcs_vs_point_count_scatter(feats)
+    eda_2_rcs_vs_point_count_scatter_by_range(feats)
+    eda_2_rcs_vs_vr_std_scatter(feats)
+    # eda_2_rcs_vs_vr_mad_scatter(feats)  # TEMP: commented out for speed, revert after (needs vr_mad above)
     eda_3_point_count_and_extent_vs_range(feats)
+
+    print("\n--- regenerating RCS plots with range-compensated RCS (_range_comp_rcs) ---")
+    eda_1_large_vehicle_merge(df, feats, rcs_col="rcs_range_comp", suffix="_range_comp_rcs")
+    eda_2_rcs_vs_azimuth(df, rcs_col="rcs_range_comp", suffix="_range_comp_rcs")
+    eda_2_rcs_vs_point_count_scatter(feats, rcs_col="mean_rcs_comp", suffix="_range_comp_rcs")
+    eda_2_rcs_vs_point_count_scatter_by_range(feats, rcs_col="mean_rcs_comp", suffix="_range_comp_rcs")

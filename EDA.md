@@ -157,7 +157,8 @@ happening to sit at different azimuths for layout reasons), each class's curve w
 expected to look different, shaped by its own typical position in a scene. Instead they
 track each other closely - stronger evidence for a shared, sensor-level effect (antenna
 gain/beam pattern) than for a pure confound, though range still isn't controlled for, so
-this isn't a final answer. One real exception: `large_vehicle` breaks the shared pattern at
+this isn't a final answer **(it wasn't - see the correction below, range was checked and
+this conclusion turned out backwards)**. One real exception: `large_vehicle` breaks the shared pattern at
 wide angles, climbing steadily past 30° instead of flattening like the other four - plausibly
 its own physical size (a truck/bus seen broadside at a wide angle presents a large flat
 panel, which could dominate over whatever the shared sensor effect is doing). `two_wheeler`
@@ -174,6 +175,33 @@ distinct effect; worth not over-reading.
 > between-class gap (5-8+ dB between adjacent classes). This is effectively a preview of item
 > #2's core question - median RCS looks like it separates these 5 classes cleanly, almost
 > independent of viewing angle.
+
+**Correction: the "shared sensor effect" read above was backwards - it's the range confound,
+not antenna gain.** Prompted by a direct challenge ("rcs should be lower as boresight angle
+increases, not higher - check for bugs"). No bug found (raw extremes by `|azimuth_sc|`
+inspected directly, values all sane). Instead, checked the confound that was explicitly left
+unchecked above: does range vary with azimuth?
+
+| \|azimuth\| | 0-5° | 5-10° | 10-15° | 15-20° | 20-25° | 25-30° | 30-40° | 40-50° | 50-60° | 60-90° |
+|---|---|---|---|---|---|---|---|---|---|---|
+| median range [m] | 22.4 | 22.2 | 24.4 | 30.1 | 34.8 | 32.3 | 28.5 | 16.9 | 12.2 | 8.9 |
+
+Same hump shape as the RCS-vs-azimuth pattern - range peaks at 20-30° (exactly where RCS
+peaked) and collapses to very short distances at wide angles (8.9m at 60-90°, exactly where
+RCS dropped again). Physically sensible: being detected at a wide angle like 70° off-boresight
+usually requires being very close to the sensor - a target far away at 70° would have to sit
+very far to the side, which is geometrically uncommon on a road.
+
+Combined with the already-confirmed, independently-verified RCS-vs-range relationship (item
+#2's azimuth section above assumed range "still isn't controlled for" as an open question -
+`FEATURE_MAP.md`'s 02e/02f now answer it: RCS rises with range, real effect, not class-mix,
+likely CFAR detection-threshold bias), the chain is: **azimuth -> range -> RCS**, not azimuth
+-> RCS directly. "Every class shows the same hump" was never evidence for a shared antenna
+gain effect specifically - range-vs-azimuth is a scene-geometry property common to every
+class (not class-specific), and RCS-vs-range is also common to every class, so the shared
+hump shape is exactly what that confound chain predicts, no antenna-pattern effect required.
+The "Headline finding" above (between-class separation stable across azimuth) still holds -
+this correction only changes the explanation for the hump itself, not the separation result.
 
 ## 3. Point-count-vs-range confound
 
@@ -329,10 +357,39 @@ conclusion and same recommendation (pair with range, or normalize) as item #3's 
 
 Day 4 EDA — key findings
 
-RCS is the strongest single feature. Cleanly separates all 5 classes (large_vehicle > car > pedestrian_group≈pedestrian > two_wheeler), and the ordering holds stable across the entire sensor FOV — not azimuth-dependent.
-Doppler spread (micro-Doppler) is the second strongest, and validates the physics. Rigid bodies (car, large_vehicle) sit 5-10x lower than articulated/multi-body classes (pedestrian, pedestrian_group, two_wheeler). Caught a real bug getting here: MAD/IQR silently treated 1-point instances as "zero dispersion" instead of "unmeasurable" — fix required n_points ≥ 3. Also found probable Doppler aliasing artifacts (clustered, not smooth outliers) — use MAD/IQR, not raw std, going forward.
-Doppler center is redundant — dropped. Its only signal (pedestrians slow/narrow, vehicles fast/broad) is behaviorally confounded (traffic conditions, not class) and already better captured by spread.
-Point count and spatial extent both collapse with range, hard. Every class converges toward degenerate values (n_points→1, extent→0) by ~45-70m — pedestrian/two_wheeler/pedestrian_group become indistinguishable by either feature past that range. Real, class-holding-within-a-bin separation still exists, so it's not pure noise — but neither feature should be used raw; pair with range or normalize.
-The train/truck/bus/large_vehicle merge is unvalidated, not validated. truck≈large_vehicle genuinely alike; bus diverges some (real — spread across 22 sequences); train diverges most (Doppler spread, extent) — but all 57 train instances come from one sequence, so that divergence is statistically indistinguishable from a single-recording artifact. Kept the merge on precedent + low-n, not on validated evidence.
-Sensor boresight-fading is real but unresolved. RCS shows a non-monotonic hump vs. azimuth (peaks 20-30° off-center), and the same shape appears independently in every class — evidence for a shared sensor-level effect over a scene-geometry confound, but range was never controlled, so not conclusive.
-Bottom line for Day 5 binning: lean on RCS + Doppler spread as primary features; use point count/extent only range-aware; skip Doppler center; treat train's classification behavior as a known blind spot, not a solved one.
+- **RCS is the strongest single feature.** Cleanly separates all 5 classes (`large_vehicle` >
+  `car` > `pedestrian_group`≈`pedestrian` > `two_wheeler`), and the ordering holds stable
+  across the entire sensor FOV - not azimuth-dependent (the apparent azimuth dependence
+  turned out to be a range confound, not a property of RCS itself - see below).
+- **Doppler spread (micro-Doppler) is the second strongest, and validates the physics.**
+  Rigid bodies (`car`, `large_vehicle`) sit 5-10x lower than articulated/multi-body classes
+  (`pedestrian`, `pedestrian_group`, `two_wheeler`). Caught a real bug getting here: MAD/IQR
+  silently treated 1-point instances as "zero dispersion" instead of "unmeasurable" - fix
+  required `n_points >= 3`. Also found probable Doppler aliasing artifacts (clustered, not
+  smooth outliers) - use MAD/IQR, not raw `std`, going forward.
+- **Doppler center is redundant - dropped.** Its only signal (pedestrians slow/narrow,
+  vehicles fast/broad) is behaviorally confounded (traffic conditions, not class) and
+  already better captured by spread.
+- **Point count and spatial extent both collapse with range, hard.** Every class converges
+  toward degenerate values (`n_points`->1, `extent`->0) by ~45-70m - `pedestrian`/
+  `two_wheeler`/`pedestrian_group` become indistinguishable by either feature past that
+  range. Real, class-holding-within-a-bin separation still exists, so it's not pure noise -
+  but neither feature should be used raw; pair with range or normalize.
+- **The train/truck/bus/large_vehicle merge is unvalidated, not validated.**
+  `truck`≈`large_vehicle` genuinely alike; `bus` diverges some (real - spread across 22
+  sequences); `train` diverges most (Doppler spread, extent) - but all 57 `train` instances
+  come from one sequence, so that divergence is statistically indistinguishable from a
+  single-recording artifact. Kept the merge on precedent + low-n, not on validated evidence.
+- **RCS's range-dependence is real, understood, and doesn't require correction.** RCS rises
+  with range (~15-18 dB from 5m to 90m), most likely CFAR detection-threshold bias (only an
+  object's strongest scattering points survive detection at long range) - confirmed via
+  independent correlation checks and raw-data inspection when directly challenged, not a
+  coding bug. The azimuth "hump" (RCS peaking 20-30° off-boresight) turned out to be fully
+  explained by this, not a separate antenna-gain effect: range itself varies with azimuth
+  the same way for every class (median range peaks at 20-30°, collapses at wide angles), so
+  azimuth's apparent effect on RCS is entirely mediated through range. Range-compensating RCS
+  was tried (`FEATURE_MAP.md`) and doesn't destroy class separation, but doesn't improve it
+  either - raw `rcs` is being kept as-is.
+- **Bottom line for Day 5 binning:** lean on RCS + Doppler spread as primary features; use
+  point count/extent only range-aware; skip Doppler center; treat `train`'s classification
+  behavior as a known blind spot, not a solved one.
