@@ -37,9 +37,10 @@ def instance_features(df: pd.DataFrame) -> pd.DataFrame:
         class_name=("class_name", "first"),
         n_points=("rcs", "size"),
         vr_std=("vr_compensated", "std"),
-        vr_mad=("vr_compensated", _mad),
-        vr_q25=("vr_compensated", lambda x: x.quantile(0.25)),
-        vr_q75=("vr_compensated", lambda x: x.quantile(0.75)),
+        # TEMP: commented out for speed, revert after
+        # vr_mad=("vr_compensated", _mad),
+        # vr_q25=("vr_compensated", lambda x: x.quantile(0.25)),
+        # vr_q75=("vr_compensated", lambda x: x.quantile(0.75)),
         mean_range=("range_sc", "mean"),
         x_min=("x_cc", "min"),
         x_max=("x_cc", "max"),
@@ -47,13 +48,13 @@ def instance_features(df: pd.DataFrame) -> pd.DataFrame:
         y_max=("y_cc", "max"),
     ).reset_index()
     feats["extent"] = np.hypot(feats["x_max"] - feats["x_min"], feats["y_max"] - feats["y_min"])
-    feats["vr_iqr"] = feats["vr_q75"] - feats["vr_q25"]
+    # feats["vr_iqr"] = feats["vr_q75"] - feats["vr_q25"]
 
     # std of 1 point is NaN already; MAD/IQR of 1-2 points are ~0 but not NaN (a point can't
     # disagree with itself) - mask all three the same way so "too little data to measure
     # dispersion" isn't silently conflated with "measured zero dispersion" in MAD/IQR only.
     too_few_points = feats["n_points"] < 3
-    feats.loc[too_few_points, ["vr_std", "vr_mad", "vr_iqr"]] = np.nan
+    feats.loc[too_few_points, ["vr_std"]] = np.nan
     return feats
 
 
@@ -213,10 +214,84 @@ def eda_2_rcs_vs_azimuth(df: pd.DataFrame) -> None:
 
     ax.set_xlabel("|azimuth_sc| bin midpoint [deg]")
     ax.set_ylabel("median RCS [dBsm]")
-    ax.set_title("Median RCS vs. distance from sensor boresight, by final class")
+    ax.set_title("Median RCS vs. distance from sensor boresight, by final class (per point)")
     ax.legend(fontsize=8)
     fig.tight_layout()
     path = EDA_DIR / "02a_rcs_vs_azimuth_by_class.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+def eda_2_point_count_and_doppler_center(df: pd.DataFrame, feats: pd.DataFrame) -> None:
+    """Item #2 baseline: per-class point count (per scan) and Doppler center (pooled,
+    point-wise). RCS baseline already covered by 01b's first panel - not repeated here."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    n_points_data = [feats.loc[feats["class_name"] == name, "n_points"] for name in classes]
+    axes[0].boxplot(n_points_data, tick_labels=classes, showfliers=False)
+    axes[0].set_ylabel("n_points per scan")
+    axes[0].set_title("Point count by final class (per scan)")
+    plt.setp(axes[0].get_xticklabels(), rotation=45, ha="right")
+
+    # min/max would be blown out by the same aliasing outliers as EDA.md item #4 - use the
+    # 0.5/99.5 percentile range instead so the plotted bulk isn't squashed to a sliver.
+    class_vr = df.loc[df["class_name"].isin(classes), "vr_compensated"]
+    vr_range = (class_vr.quantile(0.005), class_vr.quantile(0.995))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        class_points = df[df["class_name"] == name]
+        axes[1].hist(class_points["vr_compensated"], bins=40, range=vr_range, density=True,
+                     histtype="step", linewidth=1.8, color=color, label=name)
+    axes[1].set_xlabel("radial velocity, ego-compensated [m/s]")
+    axes[1].set_ylabel("density")
+    axes[1].set_title("Doppler center by final class (per point, pooled)")
+    axes[1].legend(fontsize=8)
+
+    fig.suptitle("Item #2 baseline: point count and Doppler center by final class")
+    fig.tight_layout()
+    path = EDA_DIR / "02b_point_count_and_doppler_center.png"
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
+RANGE_BINS = [0, 10, 20, 30, 40, 50, 60, 80, 100]
+
+
+def eda_3_point_count_and_extent_vs_range(feats: pd.DataFrame) -> None:
+    """Point count and spatial extent vs. mean_range, one line per final class - per EDA.md
+    item #3, checks whether class differences in n_points/extent hold up at fixed range, or
+    are mostly explained by different classes sitting at different typical ranges."""
+    classes = ["car", "large_vehicle", "pedestrian", "pedestrian_group", "two_wheeler"]
+    range_bin = pd.cut(feats["mean_range"], RANGE_BINS)
+    bin_mids = [interval.mid for interval in range_bin.cat.categories]
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    for name in classes:
+        color = GROUP_COLORS[name]
+        mask = feats["class_name"] == name
+        median_n = feats.loc[mask, "n_points"].groupby(range_bin[mask], observed=True).median()
+        median_n = median_n.reindex(range_bin.cat.categories)
+        axes[0].plot(bin_mids, median_n.to_numpy(), marker="o", color=color, label=name)
+
+        median_extent = feats.loc[mask, "extent"].groupby(range_bin[mask], observed=True).median()
+        median_extent = median_extent.reindex(range_bin.cat.categories)
+        axes[1].plot(bin_mids, median_extent.to_numpy(), marker="o", color=color, label=name)
+
+    axes[0].set_xlabel("mean_range bin midpoint [m]")
+    axes[0].set_ylabel("median n_points")
+    axes[0].set_title("Point count vs. range, by final class")
+    axes[0].legend(fontsize=8)
+
+    axes[1].set_xlabel("mean_range bin midpoint [m]")
+    axes[1].set_ylabel("median extent [m]")
+    axes[1].set_title("Spatial extent vs. range, by final class")
+    axes[1].legend(fontsize=8)
+
+    fig.suptitle("Point-count-vs-range confound (EDA.md item #3)")
+    fig.tight_layout()
+    path = EDA_DIR / "03a_point_count_extent_vs_range.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
@@ -231,5 +306,7 @@ if __name__ == "__main__":
 
     eda_1_large_vehicle_merge(df, feats)
     eda_vr_std_shape(feats)
-    eda_vr_dispersion_robust(feats)
+    # eda_vr_dispersion_robust(feats)  # TEMP: commented out for speed, revert after
     eda_2_rcs_vs_azimuth(df)
+    eda_2_point_count_and_doppler_center(df, feats)
+    eda_3_point_count_and_extent_vs_range(feats)

@@ -118,6 +118,35 @@ first. Would need range-binned or range-controlled azimuth analysis to actually 
 sensor-gain effect from a scene-geometry effect - not done yet, noted as a follow-up if the
 per-class RCS baseline below turns up something azimuth might explain.
 
+**Point count and Doppler center baseline** (`results/eda/02b_point_count_and_doppler_center.png`)
+- the RCS baseline is already covered above via the azimuth work and the 01b plot, so this
+covers the other two planned distributions:
+
+- **Point count (per scan):** `large_vehicle` clearly highest (median 5, IQR 3-9, whisker to
+  18), `car`/`pedestrian_group`/`two_wheeler` cluster together (median 2, IQR roughly 1-3/1-4),
+  `pedestrian` lowest (median 1, IQR 1-2). Roughly tracks physical size, consistent with the
+  spatial extent ordering (item #5 below) - but this is pooled across all ranges, so per item
+  #3's finding, some of this gap could be range rather than size. Not re-litigated here.
+- **Doppler center (pooled, point-wise):** `pedestrian`/`pedestrian_group` both show a sharp,
+  narrow peak right at 0 m/s - people are just physiologically slow, a fairly reliable
+  behavioral signal even if not a structural one. `two_wheeler` is wider and shifted slightly
+  positive. `car`/`large_vehicle` are both broad and fairly flat, spanning the whole range with
+  humps out past 15-20 m/s - consistent with the item #4 point that bulk radial velocity is a
+  behavioral/context property (vehicles range from stationary to highway speed depending on
+  the scene) rather than an intrinsic radar signature. So Doppler center has some
+  discriminative value (mainly "is this slow-and-narrow like a pedestrian, or fast-and-wide
+  like a vehicle") but the vehicle classes don't separate from each other on it, matching the
+  earlier conclusion that Doppler *spread*, not center, is the more trustworthy feature.
+
+**Verdict on Doppler center:** checked and found redundant, not pursued further as a
+candidate feature. Its one real signal (pedestrian-type classes are slow/narrow, vehicle
+classes are broad/fast) is already captured more cleanly by Doppler spread (item #4), which
+additionally ties to a structural cause (articulation) rather than just "how fast was this
+thing going in this recording." `car` and `large_vehicle` being indistinguishable from each
+other here is consistent with center being behaviorally confounded (reflects traffic
+conditions in the recording, not a property of the class) rather than a structural signature
+- same concern already raised for `train`'s bimodal shape back in item #1.
+
 **Follow-up: same check, broken out per class** (`results/eda/02a_rcs_vs_azimuth_by_class.png`)
 - more informative than the pooled version. Every class shows the same qualitative hump:
 low near boresight (0-20°), peaking around 20-30°, declining/flattening past that -
@@ -155,7 +184,30 @@ measuring "how far away this class tends to be recorded" rather than "how big th
 class is." Scatter of point count vs. range, colored by class, before trusting point
 count as a discriminative feature.
 
-**Findings:** _(TBD)_
+**Findings:** checked both `n_points` and `extent` vs. `mean_range`, per scan, one line
+(median) per final class (`results/eda/03a_point_count_extent_vs_range.png`) - extended to
+`extent` too since item #5's discussion established it likely shares the same confound as
+point count, not just point count alone.
+
+The confound is real and substantial, not subtle. Every class's median `n_points` and
+`extent` decline sharply with range, both converging toward degenerate values (`n_points`
+-> 1, `extent` -> 0) by roughly 45-70m, regardless of true physical size. `pedestrian`,
+`two_wheeler`, and `pedestrian_group` collapse into essentially the *same* degenerate values
+by ~45m onward - meaning past that range, point count and extent alone can no longer tell
+these three classes apart at all, even though they're physically quite different objects.
+
+The reassuring part: between-class separation still holds *within* a range bin, especially
+for `large_vehicle`, which sits clearly above every other class at every single range bin in
+both panels - so the earlier extent-ordering finding (item #1/merged-classes plot) wasn't
+purely a range artifact, there's a genuine class effect riding on top of the range decay.
+But the absolute numbers aren't safe to compare across classes without accounting for range -
+if classes differ in their typical recording range in this dataset (not yet checked), part
+of any gap between them could still be range, not size.
+
+**Practical takeaway for later feature engineering:** `n_points` and `extent` should
+probably not be used as raw standalone features - either paired with range (give the model
+both, let it learn the range-dependence itself) or turned into a range-normalized/residual
+version, rather than trusted as-is.
 
 ## 4. Doppler spread within an instance, not just its center
 
@@ -247,4 +299,40 @@ point count does - a candidate size feature that isn't as confounded by #3. Also
 in #1's sub-class comparison; here the question is whether it separates the 5 final
 classes generally, not just the large_vehicle sub-classes.
 
-**Findings:** _(TBD)_
+**Correction to the plan above:** item #3's findings showed extent does *not* actually
+degrade less with range than point count - both converge to degenerate values (extent -> 0,
+n_points -> 1) by roughly the same 45-70m mark. That assumption, written before checking, was
+wrong; extent isn't meaningfully more range-robust than point count. Doesn't change the
+findings below, just the "why extent might be worth using" framing.
+
+**Findings:** already answered by two plots generated for other items, not re-run here -
+`results/eda/01b_merged_vs_other_classes.png` (third panel) and
+`results/eda/03a_point_count_extent_vs_range.png` (second panel).
+
+Extent separates the 5 final classes generally, and cleanly: `large_vehicle` stands well
+apart from everything else (median ~7m, IQR ~3-11m, no real overlap with the other four's
+medians), then `car` (~1.5m), `pedestrian_group` (~1m - multiple people spread over more
+area than one person, makes sense), `two_wheeler` (~0.5-1m), and `pedestrian` lowest of all
+(median near 0). That ordering tracks real physical size well.
+
+Two caveats already established, not repeated in full: (1) `pedestrian`'s near-zero median
+is largely the same degenerate single/few-point issue flagged in item #4 (over half its scans
+have <=1 point, forcing extent to exactly 0 by construction) rather than pedestrians being
+truly shapeless; (2) per item #3, the class separation holds up *within* a range bin (so it's
+not a pure range artifact), but the absolute numbers aren't safe to compare across classes
+without accounting for range, since typical recording range per class hasn't been checked.
+Net: extent is a usable, range-caveated size feature, not a clean standalone one - same
+conclusion and same recommendation (pair with range, or normalize) as item #3's takeaway for
+`n_points`.
+
+# Conclusion
+
+Day 4 EDA — key findings
+
+RCS is the strongest single feature. Cleanly separates all 5 classes (large_vehicle > car > pedestrian_group≈pedestrian > two_wheeler), and the ordering holds stable across the entire sensor FOV — not azimuth-dependent.
+Doppler spread (micro-Doppler) is the second strongest, and validates the physics. Rigid bodies (car, large_vehicle) sit 5-10x lower than articulated/multi-body classes (pedestrian, pedestrian_group, two_wheeler). Caught a real bug getting here: MAD/IQR silently treated 1-point instances as "zero dispersion" instead of "unmeasurable" — fix required n_points ≥ 3. Also found probable Doppler aliasing artifacts (clustered, not smooth outliers) — use MAD/IQR, not raw std, going forward.
+Doppler center is redundant — dropped. Its only signal (pedestrians slow/narrow, vehicles fast/broad) is behaviorally confounded (traffic conditions, not class) and already better captured by spread.
+Point count and spatial extent both collapse with range, hard. Every class converges toward degenerate values (n_points→1, extent→0) by ~45-70m — pedestrian/two_wheeler/pedestrian_group become indistinguishable by either feature past that range. Real, class-holding-within-a-bin separation still exists, so it's not pure noise — but neither feature should be used raw; pair with range or normalize.
+The train/truck/bus/large_vehicle merge is unvalidated, not validated. truck≈large_vehicle genuinely alike; bus diverges some (real — spread across 22 sequences); train diverges most (Doppler spread, extent) — but all 57 train instances come from one sequence, so that divergence is statistically indistinguishable from a single-recording artifact. Kept the merge on precedent + low-n, not on validated evidence.
+Sensor boresight-fading is real but unresolved. RCS shows a non-monotonic hump vs. azimuth (peaks 20-30° off-center), and the same shape appears independently in every class — evidence for a shared sensor-level effect over a scene-geometry confound, but range was never controlled, so not conclusive.
+Bottom line for Day 5 binning: lean on RCS + Doppler spread as primary features; use point count/extent only range-aware; skip Doppler center; treat train's classification behavior as a known blind spot, not a solved one.
