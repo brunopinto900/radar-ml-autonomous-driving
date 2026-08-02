@@ -146,3 +146,29 @@ first candidate for Day 7's iteration pass if results look off, not built in fro
 Implemented in `scripts/instance_histograms.py` (per-instance histograms, currently `N_BINS =
 8` there - not yet updated to match this decision) and `scripts/bin_sweep.py` (the sweep
 itself, population-level, `results/bin_sweep/`).
+
+## 4. Training efficiency: cache built feature vectors, bigger batch size
+
+Measured directly (not estimated) on the full train/val splits before committing to a real
+run: `build_dataset` (the per-instance histogram computation) takes ~169s for the 354,277
+train instances and ~32s for the 67,663 val instances - ~3.5 min total, dominated by the
+Python-level loop over instances (`0.48 ms/instance`), not I/O. Training itself measured at
+`4.6s/epoch` on the full train set at `batch_size=64` (5,536 batches/epoch) - at the paper's
+1000 epochs that's ~77 min of training on top of the ~3.5 min pipeline cost, ~80 min total.
+
+**Decision 1 - cache the built feature vectors.** The ~3.5 min pipeline cost is unavoidable
+once, but `train_mlp.py` was about to pay it on *every* run (every architecture tweak, every
+ablation). `histogram_features.build_dataset` output (`X`, `y`, and now also the instance keys
+- see decision 5) is cached to `results/mlp_feature_cache/*.npy`/`*.parquet` and loaded
+directly on subsequent runs. Turns a per-run tax into a one-time cost. **Caveat:** the cache
+is keyed only by split name (`train`/`val`), not by a hash of `FEATURES`/`N_BINS` - if either
+changes in `histogram_features.py`, `results/mlp_feature_cache/` must be deleted manually,
+nothing detects the mismatch automatically.
+
+**Decision 2 - batch size `32 -> 256`.** At `batch_size=64` on the full train set, most of the
+measured `4.6s/epoch` is Python-loop/optimizer-step overhead, not actual compute - the model
+is tiny (~1,400 params for the smoke-test one-hidden-layer version). Fewer, bigger batches
+should cut wall-clock time substantially with negligible effect on results at this model size.
+Not yet re-measured to confirm the speedup - next full-scale run should check this.
+
+Implemented in `scripts/train_mlp.py` (`load_or_build_dataset`, `BATCH_SIZE = 256`).

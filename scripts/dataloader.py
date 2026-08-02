@@ -206,6 +206,77 @@ def plot_scene(
     fig.savefig(path, dpi=150)
 
 
+def plot_predictions_grid(
+    points_df: pd.DataFrame,
+    keys_df: pd.DataFrame,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    classes: list[str],
+    path: str | Path,
+    n: int = 9,
+    rng: np.random.Generator | None = None,
+) -> None:
+    """Grid of n instances, each panel showing that instance's own points and
+    bounding box in x/y space - green box if the model's prediction matches the
+    true label, red if not, true/predicted class names in the panel title.
+
+    keys_df/y_true/y_pred must be row-aligned (same order) -
+    see histogram_features.build_dataset, which returns exactly this alignment.
+    points_df is the full points table the instances were drawn from (e.g.
+    val_points.parquet) - only the matching instance's own points are plotted
+    per panel, the rest of points_df is just there to look them up in.
+    """
+    import matplotlib.pyplot as plt
+
+    rng = rng or np.random.default_rng()
+    n = min(n, len(y_true))
+    idx = rng.choice(len(y_true), size=n, replace=False)
+
+    ncols = 3
+    nrows = -(-n // ncols)  # ceil
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4.5 * nrows))
+    axes = np.atleast_1d(axes).flatten()
+
+    for ax, i in zip(axes, idx):
+        key = keys_df.iloc[i]
+        obj = points_df[
+            (points_df["sequence_name"] == key["sequence_name"])
+            & (points_df["timestamp"] == key["timestamp"])
+            & (points_df["track_id"] == key["track_id"])
+        ]
+        true_name, pred_name = classes[y_true[i]], classes[y_pred[i]]
+        color = "tab:green" if true_name == pred_name else "tab:red"
+
+        ax.scatter(obj["y_cc"], obj["x_cc"], c="tab:blue", s=25, edgecolors="k", linewidths=0.3)
+        # Padding scales with the box's own size, not a fixed 0.5m - a fixed pad
+        # would barely show on a 30m-long large_vehicle and dominate a 0.3m
+        # pedestrian. No sensor marker here (unlike plot_scene): this is a
+        # close-up of one instance, not a scene - including (0,0) would force
+        # the frame to stretch out to wherever the object is (tens of meters),
+        # leaving the actual point cloud a tiny speck in a huge empty panel.
+        span = max(obj["y_cc"].max() - obj["y_cc"].min(), obj["x_cc"].max() - obj["x_cc"].min(), 0.2)
+        pad = 0.3 * span
+        y_min, y_max = obj["y_cc"].min() - pad, obj["y_cc"].max() + pad
+        x_min, x_max = obj["x_cc"].min() - pad, obj["x_cc"].max() + pad
+        ax.add_patch(plt.Rectangle(
+            (y_min, x_min), y_max - y_min, x_max - x_min,
+            fill=False, edgecolor=color, linewidth=2,
+        ))
+        ax.set_xlim(y_max, y_min)  # inverted: y_cc positive = left, same convention as plot_scene
+        ax.set_ylim(x_min, x_max)
+        ax.set_title(f"true: {true_name}\npred: {pred_name}", fontsize=9, color=color)
+        ax.set_aspect("equal", adjustable="box")
+        ax.tick_params(labelsize=7)
+
+    for ax in axes[n:]:
+        ax.axis("off")
+
+    fig.suptitle("Model predictions vs. ground truth (green = correct, red = wrong)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+
+
 def plot_object_attributes(
     obj: np.ndarray,
     title: str,
