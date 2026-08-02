@@ -92,3 +92,57 @@ train (fit), val (tune/iterate on, checked repeatedly), test (final number, touc
 
 Implemented in `scripts/make_split.py`, output at `results/sequence_splits.csv`
 (sequence_name -> train/val/test).
+
+## 3. Histogram encoding for Day 6: paper-faithful feature space, bin counts from a sweep
+
+Day 5/6 needs a fixed-size input representation per instance for the MLP. Landed on
+Tatarchenko & Rambach's histogram-encoding scheme (see `TODO.md` Day 8 for the paper) after
+first trying and rejecting a point-wise (no grouping at all) design - point-wise solves the
+real-world object-association problem for free, but without any per-object reference frame,
+position features can only encode *where* an object was recorded, never its shape, and no
+spread/shape signal is computable from a single point in isolation (full reasoning in
+`FEATURE_MAP.md`). Per-instance histograms need `track_id` grouping at training time; the
+real-world clustering gap this doesn't solve is tracked separately (`TODO.md` v2).
+
+**Feature space: matches the paper exactly, not our own `_rel`/spread extensions (yet).**
+Their features are radial distance, ego-motion-compensated Doppler velocity, RCS, and
+Cartesian `x`/`y`/`z` computed *relative to the tracked object's own center* (their reasoning:
+"the object shape in Cartesian coordinates is independent of the distance between the object
+and the radar sensor"). Only `x`/`y`/`z` are object-centered in their method - radial distance
+stays raw. Mirrored exactly for the sensor-#2, 2D case: `rcs` (raw), `vr_compensated` (raw),
+`range_sc` (raw), `x_rel`/`y_rel` (relative to each instance's own **mean** position - mean,
+not median, since "centroid" means center of mass and there's no established
+single-outlier-corruption problem for position the way aliasing corrupts `vr_compensated`).
+The relative/de-meaned "spread" features found in `FEATURE_MAP.md` (`vr_rel` with
+median-centering, `extent_rel`, `rcs_rel`, `range_rel`) go beyond what the paper does and are
+deliberately deferred to `TODO.md`'s v1.1 future work - build the paper-faithful baseline
+first, add the extensions once it's working, not before.
+
+**Bin count: 16 bins per feature, uniform across all five.** Checked with
+`scripts/bin_sweep.py` - a population-level (all points, all instances of a class, pooled;
+individual instances are usually far too few points to meaningfully validate bin count on
+their own) sweep of [8, 16, 32, 64] bins per feature, by class. Findings:
+
+- `rcs`: 16-32 bins resolves the real two-cluster class separation cleanly; 64 starts showing
+  jagged tail noise (bins with too few points to be stable).
+- `vr_compensated`: needed finer bins than the others to show its real structure - 8-16 bins
+  looks flat, 32 bins reveals genuine multi-modal traffic-speed clusters in `car`/
+  `large_vehicle` and a real double-hump in `two_wheeler`; 64 turns visibly noisy.
+- `range_sc`: tolerates fine bins better than the rest - a `pedestrian_group` secondary bump
+  around 35-45m sharpens cleanly all the way to 64 bins without much added noise.
+- `x_rel`/`y_rel`: `pedestrian`'s peak density keeps climbing as bins get finer (not noise -
+  its spatial footprint is genuinely near a single point, per `EDA.md` item #4's >54%
+  single-point instances, so finer bins just keep resolving the same near-delta-function
+  shape). `large_vehicle` stays broad and flat at every resolution checked - the real signal.
+  Separation is already clear by 16 bins; finer bins add no new information here.
+
+**Decision:** one uniform `N_BINS = 16` across all five features for the Day 6 baseline -
+comfortably inside the "shows real structure, not yet noisy" range for every feature checked,
+close to the paper's own uniform `K = 20`, and keeps the encoding simple (matches their
+choice of one fixed bin count rather than tuning per feature). `vr_compensated` specifically
+would benefit from finer bins (32) to show its multi-modal structure in full - noted as a
+first candidate for Day 7's iteration pass if results look off, not built in from the start.
+
+Implemented in `scripts/instance_histograms.py` (per-instance histograms, currently `N_BINS =
+8` there - not yet updated to match this decision) and `scripts/bin_sweep.py` (the sweep
+itself, population-level, `results/bin_sweep/`).

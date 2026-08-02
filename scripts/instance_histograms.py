@@ -75,7 +75,7 @@ CENTERING = {"vr_rel": "median"}
 # so bin width actually matches the scale of the signal.
 EXPLICIT_RANGES = {"vr_rel": (-3.0, 3.0)}
 
-N_BINS = 8
+N_BINS = 16  # DESIGN_DECISIONS.md decision 3 - population-level sweep across [8,16,32,64]
 N_EXAMPLES = 8
 MIN_POINTS = 5  # for visualization only - most instances are sparser than this (EDA.md item #4)
 
