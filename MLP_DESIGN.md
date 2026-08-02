@@ -100,9 +100,13 @@ framing entirely:
 - Activation: not specified in the paper's method section - default to ReLU unless there's a
   reason to deviate (standard choice, no evidence yet that it matters here)
 - Loss: class-weighted cross-entropy (see Labels and loss above)
-- Optimizer: Adam, `lr = 1e-5`, batch size 64 (paper's numbers)
-- Epochs: paper trains 1000 - likely excessive for this smaller/different dataset, worth
-  watching for early convergence/overfitting rather than assuming their number transfers
+- Optimizer: Adam, `lr = 1e-5` (paper's number; batch size overridden to 256, see
+  `DESIGN_DECISIONS.md` decision 4)
+- Epochs: paper trains 1000 - **confirmed excessive** on the real run. Val accuracy/loss
+  plateau by ~epoch 20 with no overfitting (train/val track together the whole way); the
+  remaining 980 epochs bought ~1-1.5pp raw val accuracy for ~60x the training time. Using the
+  20-epoch checkpoint going forward. Full writeup, including why this isn't a local-minimum/lr
+  problem, in `MLP_FINDINGS.md`.
 
 ## Data pipeline (not yet built)
 

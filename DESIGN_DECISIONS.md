@@ -169,6 +169,15 @@ nothing detects the mismatch automatically.
 measured `4.6s/epoch` is Python-loop/optimizer-step overhead, not actual compute - the model
 is tiny (~1,400 params for the smoke-test one-hidden-layer version). Fewer, bigger batches
 should cut wall-clock time substantially with negligible effect on results at this model size.
-Not yet re-measured to confirm the speedup - next full-scale run should check this.
 
-Implemented in `scripts/train_mlp.py` (`load_or_build_dataset`, `BATCH_SIZE = 256`).
+**Confirmed** with a 2-epoch timing pass (`scripts/train_mlp_full.py`) on the full train/val
+splits, using the actual paper-faithful 3-layer architecture (not the smoke-test 1-layer model)
+at `batch_size=256`: `~1.4s/epoch` (1,384 batches/epoch), vs. the original `4.6s/epoch` at
+`batch_size=64` (5,536 batches/epoch) - roughly the same ~4x reduction as the drop in batch
+count, confirming the cost is overhead-bound, not compute-bound, even with the deeper model.
+At `~1.4s/epoch`, the paper's 1000 epochs is **~24 min**, not the ~77 min estimated from the
+`batch_size=64` measurement. History from this timing pass is saved to
+`results/mlp_full_run/timing_run_history.npy` for later comparison against the real run.
+
+Implemented in `scripts/train_mlp.py` (`load_or_build_dataset`, `BATCH_SIZE = 256`) and
+`scripts/train_mlp_full.py` (the paper-faithful 3-layer architecture and full-scale run).

@@ -149,7 +149,12 @@ def plot_scene(
     show_object_boxes: bool = True,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
+    predictions: dict[bytes, tuple[str, str]] | None = None,
 ) -> None:
+    """predictions, if given: track_id -> (true_name, pred_name). Each tracked
+    object's box is colored/labeled by its own prediction (green if correct,
+    red if not) instead of the plain black box; objects with no entry (e.g. a
+    dropped class) fall back to a plain black box."""
     import matplotlib.pyplot as plt
 
     if image_path is not None:
@@ -176,19 +181,33 @@ def plot_scene(
 
     if show_object_boxes:
         pad = 0.5
-        for i, track_id in enumerate(list_track_ids(detections)):
+        plain_box_labeled = False
+        for track_id in list_track_ids(detections):
             obj = object_detections(detections, track_id)
             y_min, y_max = obj["y_cc"].min() - pad, obj["y_cc"].max() + pad
             x_min, x_max = obj["x_cc"].min() - pad, obj["x_cc"].max() + pad
+            pred = predictions.get(track_id) if predictions else None
+
+            if pred is not None:
+                true_name, pred_name = pred
+                color = "tab:green" if true_name == pred_name else "tab:red"
+                linewidth = 2.2
+            else:
+                color = "black"
+                linewidth = 1.2
+
             ax.add_patch(plt.Rectangle(
-                (y_min, x_min),
-                y_max - y_min,
-                x_max - x_min,
-                fill=False,
-                edgecolor="black",
-                linewidth=1.2,
-                label="tracked object" if i == 0 else None,
+                (y_min, x_min), y_max - y_min, x_max - x_min,
+                fill=False, edgecolor=color, linewidth=linewidth, zorder=5,
+                label="tracked object (no prediction)" if pred is None and not plain_box_labeled else None,
             ))
+            plain_box_labeled = plain_box_labeled or pred is None
+
+            if pred is not None:
+                ax.annotate(
+                    f"true: {true_name}\npred: {pred_name}", xy=(y_min, x_max), xytext=(0, 4),
+                    textcoords="offset points", color=color, fontsize=7, fontweight="bold", zorder=5,
+                )
 
     ax.scatter(0, 0, c="black", marker="^", s=100, label="sensor")
     ax.set_xlabel("y_cc [m] (left)")
