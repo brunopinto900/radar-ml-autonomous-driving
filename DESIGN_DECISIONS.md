@@ -96,7 +96,7 @@ Implemented in `scripts/make_split.py`, output at `results/sequence_splits.csv`
 ## 3. Histogram encoding for Day 6: paper-faithful feature space, bin counts from a sweep
 
 Day 5/6 needs a fixed-size input representation per instance for the MLP. Landed on
-Tatarchenko & Rambach's histogram-encoding scheme (see `TODO.md` Day 8 for the paper) after
+Tatarchenko & Rambach's histogram-encoding scheme (see `TODO.md` Day 9 for the paper) after
 first trying and rejecting a point-wise (no grouping at all) design - point-wise solves the
 real-world object-association problem for free, but without any per-object reference frame,
 position features can only encode *where* an object was recorded, never its shape, and no
@@ -141,7 +141,7 @@ comfortably inside the "shows real structure, not yet noisy" range for every fea
 close to the paper's own uniform `K = 20`, and keeps the encoding simple (matches their
 choice of one fixed bin count rather than tuning per feature). `vr_compensated` specifically
 would benefit from finer bins (32) to show its multi-modal structure in full - noted as a
-first candidate for Day 7's iteration pass if results look off, not built in from the start.
+first candidate for Day 8's iteration pass if results look off, not built in from the start.
 
 Implemented in `scripts/instance_histograms.py` (per-instance histograms, currently `N_BINS =
 8` there - not yet updated to match this decision) and `scripts/bin_sweep.py` (the sweep

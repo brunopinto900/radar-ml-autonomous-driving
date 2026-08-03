@@ -236,7 +236,7 @@ until it's time to actually pick the Day 5 feature set.
 
 Everything above this section works on hand-picked scalar statistics (`mean_rcs`, `vr_std`,
 `extent`, ...). Day 5's actual task is the histogram-encoding scheme itself - the same idea
-Tatarchenko & Rambach use (see `TODO.md` Day 8): instead of a few hand-picked scalars per
+Tatarchenko & Rambach use (see `TODO.md` Day 9): instead of a few hand-picked scalars per
 instance, compute a raw-count histogram (K=8 bins) of every point's value for each feature,
 per instance, and let those bins be the model's input vector. This section checks whether
 that representation actually looks separable before committing to it, using a handful of

@@ -93,7 +93,7 @@ split). Implemented in `scripts/train_mlp.py`'s `class_weights`.
 ## Architecture (paper-faithful baseline)
 
 Starting from the paper's own numbers, for the same reason the feature set does - keeps the
-Day 8 comparison an actual apples-to-apples check on design choices, not a different problem
+Day 9 comparison an actual apples-to-apples check on design choices, not a different problem
 framing entirely:
 
 - 3 fully-connected layers, 16 hidden units each: `80 -> 16 -> 16 -> 5`
@@ -123,7 +123,7 @@ samples or pooled population plots), not a function that maps an instance's poin
 
 - **Low-point-count instances.** `pedestrian` is 54.4% single-point instances (not
   pedestrian-specific: `car` is 33.8% too - see `TODO.md` Day 6). A 1-point instance's 16-bin
-  histogram is nearly empty. Interim plan: include everything in v1, check honestly (Day 7)
+  histogram is nearly empty. Interim plan: include everything in v1, check honestly (Day 8)
   whether accuracy is actually bad specifically on sparse instances before filtering/weighting
   them specially.
 - **Evaluation metric.** Given the ~7.6:1 real imbalance, raw accuracy can look good while the
