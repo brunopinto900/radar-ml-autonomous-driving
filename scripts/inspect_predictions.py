@@ -15,7 +15,7 @@ from train_mlp_full import HIDDEN_DIM, PaperMLP
 
 OUT_DIR = RESULTS_DIR / "predictions_camera"
 CACHE_DIR = RESULTS_DIR / "mlp_feature_cache"
-MODEL_PATH = RESULTS_DIR / "mlp_full_run" / "model_20epoch.pt"
+MODEL_PATH = RESULTS_DIR / "mlp_full_run" / "baseline_20epoch_h16" / "model.pt"
 SEED = 42
 
 

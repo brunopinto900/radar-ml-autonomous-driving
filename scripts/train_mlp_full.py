@@ -1,12 +1,14 @@
 """Day 6 real run: paper-faithful 3-layer architecture, full train/val splits,
 final batch size (see MLP_DESIGN.md's "Architecture" section and
 DESIGN_DECISIONS.md decisions 3-4). Timing confirmed first with a 2-epoch pass
-(results/mlp_full_run/timing_run_history.npy, ~1.4s/epoch). The first full
-1000-epoch run (results/mlp_full_run/*_1000epoch.*) showed val accuracy/loss
-plateauing by ~epoch 20 with no overfitting (MLP_FINDINGS.md) - EPOCHS below
-was dropped to 20 accordingly. Outputs are tagged with the epoch count so
-different-length runs don't overwrite each other. Reuses histogram_features.py
-and train_mlp.py's caching/class-weight helpers rather than reimplementing them.
+(results/mlp_full_run/baseline_20epoch_h16/timing_2epoch_check.npy, ~1.4s/epoch).
+The first full 1000-epoch run (results/mlp_full_run/epoch_ablation_1000epoch/)
+showed val accuracy/loss plateauing by ~epoch 20 with no overfitting
+(MLP_FINDINGS.md) - EPOCHS below was dropped to 20 accordingly. Each run writes
+to its own results/mlp_full_run/<EXPERIMENT>/ subfolder (set EXPERIMENT to match
+whatever HIDDEN_DIM/EPOCHS/MIN_TRAIN_POINTS you're running) so different runs
+don't overwrite each other. Reuses histogram_features.py and train_mlp.py's
+caching/class-weight helpers rather than reimplementing them.
 """
 import time
 
@@ -20,20 +22,45 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from dataloader import RESULTS_DIR, plot_predictions_grid  # noqa: E402
-from histogram_features import FEATURES, N_BINS, add_relative_xy, fit_bin_edges  # noqa: E402
+from histogram_features import FEATURES, GROUP_KEY, N_BINS, add_relative_xy, fit_bin_edges  # noqa: E402
 from train_mlp import CLASSES, class_weights, load_or_build_dataset  # noqa: E402
 
-OUT_DIR = RESULTS_DIR / "mlp_full_run"
+OUT_ROOT = RESULTS_DIR / "mlp_full_run"
 
 SEED = 42
-HIDDEN_DIM = 16
+HIDDEN_DIM = 16  # canonical baseline (MLP_DESIGN.md). Bump to run a capacity
+                 # ablation (MLP_FINDINGS.md) - pair with EXPERIMENT below so
+                 # ablation runs don't overwrite this checkpoint.
 LR = 1e-5  # paper's value (MLP_DESIGN.md) - tuned for their batch_size=64, not
            # our 256. The 2-epoch timing pass showed real, continuing loss/acc
            # movement at this lr through the deeper 3-layer net, so keeping it
            # for the real run rather than guessing a correction with no evidence.
 BATCH_SIZE = 256  # DESIGN_DECISIONS.md decision 4
-EPOCHS = 20  # not the paper's 1000 - see MLP_FINDINGS.md, val plateaued by ~epoch 20
-TAG = f"{EPOCHS}epoch"
+EPOCHS = 20  # not the paper's 1000 - see MLP_FINDINGS.md, val plateaued by ~epoch 20. Bump to
+            # 80 to reproduce the gradient-step-matched min4pts rerun (section 6): "20 epochs"
+            # means ~27,700 total gradient steps for the full 354,277-instance train set
+            # (1,385 batches/epoch) but only ~7,100 for the 91,269-instance min4pts set (357
+            # batches/epoch) - steps/epoch scales with dataset size at fixed BATCH_SIZE, so 80
+            # epochs there matches the baseline's total step count instead of its epoch count.
+MIN_TRAIN_POINTS = 1  # >1 drops sparse instances from TRAINING only (val stays full/
+                      # unfiltered by default, see MIN_VAL_POINTS below) - tests whether
+                      # near-empty training instances are actively harmful (noise) vs.
+                      # weak-but-real signal, MLP_FINDINGS.md. bin_edges are still fit on the
+                      # FULL unfiltered train split below, so this isolates one variable.
+MIN_VAL_POINTS = 1  # >1 drops sparse instances from VALIDATION too - answers a different
+                    # question than MIN_TRAIN_POINTS: not "is sparse training data harmful"
+                    # but "how good is this checkpoint at the instances it could plausibly
+                    # be expected to get right" - i.e. is the min-train-points checkpoint's
+                    # poor overall val accuracy just it being scored on cases (sparse val
+                    # instances) it was never trained to handle in the first place.
+
+EXPERIMENT = "baseline_20epoch_h16"  # output subfolder under results/mlp_full_run/ - set this
+                                      # together with HIDDEN_DIM/EPOCHS/MIN_TRAIN_POINTS/
+                                      # MIN_VAL_POINTS above when running an ablation, e.g.
+                                      # "capacity_ablation_h64", "min_train_points_ablation",
+                                      # "epoch_ablation_1000epoch",
+                                      # "min_train_points_epoch_matched"
+OUT_DIR = OUT_ROOT / EXPERIMENT
 
 
 class PaperMLP(nn.Module):
@@ -59,11 +86,32 @@ if __name__ == "__main__":
 
     train_df = add_relative_xy(pd.read_parquet(RESULTS_DIR / "train_points.parquet"))
     val_df = add_relative_xy(pd.read_parquet(RESULTS_DIR / "val_points.parquet"))
-    bin_edges = fit_bin_edges(train_df)
+    bin_edges = fit_bin_edges(train_df)  # fit on the FULL unfiltered train split always -
+                                          # keeps this the same variable as the canonical run.
 
-    X_train, y_train, keys_train = load_or_build_dataset(train_df, bin_edges, CLASSES, "train")
-    X_val, y_val, keys_val = load_or_build_dataset(val_df, bin_edges, CLASSES, "val")
-    print(f"train: {len(y_train)} instances, val: {len(y_val)} instances (full splits)")
+    train_cache_name = "train"
+    if MIN_TRAIN_POINTS > 1:
+        n_points = train_df.groupby(GROUP_KEY).size()
+        keep_keys = n_points[n_points >= MIN_TRAIN_POINTS].index
+        n_before = len(n_points)
+        train_df = train_df.set_index(GROUP_KEY).loc[keep_keys].reset_index()
+        train_cache_name = f"train_min{MIN_TRAIN_POINTS}pts"
+        print(f"Filtered train instances: {n_before} -> {len(keep_keys)} "
+              f"(dropped {n_before - len(keep_keys)} with <{MIN_TRAIN_POINTS} points)")
+
+    val_cache_name = "val"
+    if MIN_VAL_POINTS > 1:
+        n_points_val = val_df.groupby(GROUP_KEY).size()
+        keep_keys_val = n_points_val[n_points_val >= MIN_VAL_POINTS].index
+        n_before_val = len(n_points_val)
+        val_df = val_df.set_index(GROUP_KEY).loc[keep_keys_val].reset_index()
+        val_cache_name = f"val_min{MIN_VAL_POINTS}pts"
+        print(f"Filtered val instances: {n_before_val} -> {len(keep_keys_val)} "
+              f"(dropped {n_before_val - len(keep_keys_val)} with <{MIN_VAL_POINTS} points)")
+
+    X_train, y_train, keys_train = load_or_build_dataset(train_df, bin_edges, CLASSES, train_cache_name)
+    X_val, y_val, keys_val = load_or_build_dataset(val_df, bin_edges, CLASSES, val_cache_name)
+    print(f"train: {len(y_train)} instances, val: {len(y_val)} instances")
 
     X_train_t, y_train_t = torch.tensor(X_train), torch.tensor(y_train)
     X_val_t, y_val_t = torch.tensor(X_val), torch.tensor(y_val)
@@ -130,11 +178,11 @@ if __name__ == "__main__":
               f"out={history['grad_norm_layer3_out'][-1]:.4f}]  time {epoch_time:.1f}s")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    history_path = OUT_DIR / f"history_{TAG}.npy"
+    history_path = OUT_DIR / "history.npy"
     np.save(history_path, history, allow_pickle=True)
     print(f"\nSaved {history_path}")
 
-    model_path = OUT_DIR / f"model_{TAG}.pt"
+    model_path = OUT_DIR / "model.pt"
     torch.save(model.state_dict(), model_path)
     print(f"Saved {model_path}")
 
@@ -153,7 +201,7 @@ if __name__ == "__main__":
     print(cm)
 
     plot_predictions_grid(val_df, keys_val, y_val, val_preds, CLASSES,
-                           OUT_DIR / f"predictions_grid_{TAG}.png", n=9, rng=rng)
+                           OUT_DIR / "predictions_grid.png", n=9, rng=rng)
 
     epochs_axis = np.arange(1, EPOCHS + 1)
 
@@ -162,11 +210,11 @@ if __name__ == "__main__":
     ax.plot(epochs_axis, history["val_loss"], label="val", color="tab:orange")
     ax.set_xlabel("epoch")
     ax.set_ylabel("loss (class-weighted cross-entropy)")
-    ax.set_title(f"Full run ({TAG}): cost vs. epoch (n_train={n_train}, n_val={len(y_val)})")
+    ax.set_title(f"Full run ({EXPERIMENT}): cost vs. epoch (n_train={n_train}, n_val={len(y_val)})")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / f"cost_{TAG}.png", dpi=150)
-    print(f"Saved {OUT_DIR / f'cost_{TAG}.png'}")
+    fig.savefig(OUT_DIR / "cost.png", dpi=150)
+    print(f"Saved {OUT_DIR / 'cost.png'}")
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(epochs_axis, history["train_acc"], label="train", color="tab:blue")
@@ -174,11 +222,11 @@ if __name__ == "__main__":
     ax.set_xlabel("epoch")
     ax.set_ylabel("accuracy")
     ax.set_ylim(0, 1.02)
-    ax.set_title(f"Full run ({TAG}): accuracy vs. epoch (n_train={n_train}, n_val={len(y_val)})")
+    ax.set_title(f"Full run ({EXPERIMENT}): accuracy vs. epoch (n_train={n_train}, n_val={len(y_val)})")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / f"accuracy_{TAG}.png", dpi=150)
-    print(f"Saved {OUT_DIR / f'accuracy_{TAG}.png'}")
+    fig.savefig(OUT_DIR / "accuracy.png", dpi=150)
+    print(f"Saved {OUT_DIR / 'accuracy.png'}")
 
     fig, ax = plt.subplots(figsize=(7, 5))
     for name, color in zip(grad_layers, ["tab:blue", "tab:green", "tab:red"]):
@@ -186,11 +234,11 @@ if __name__ == "__main__":
     ax.set_xlabel("epoch")
     ax.set_ylabel("mean per-batch gradient L2 norm (weight matrix)")
     ax.set_yscale("log")
-    ax.set_title(f"Full run ({TAG}): gradient norms vs. epoch, input-side to output-side")
+    ax.set_title(f"Full run ({EXPERIMENT}): gradient norms vs. epoch, input-side to output-side")
     ax.legend()
     fig.tight_layout()
-    fig.savefig(OUT_DIR / f"grad_norms_{TAG}.png", dpi=150)
-    print(f"Saved {OUT_DIR / f'grad_norms_{TAG}.png'}")
+    fig.savefig(OUT_DIR / "grad_norms.png", dpi=150)
+    print(f"Saved {OUT_DIR / 'grad_norms.png'}")
 
     fig, ax = plt.subplots(figsize=(6.5, 5.5))
     im = ax.imshow(cm.to_numpy(), cmap="Blues")
@@ -198,7 +246,7 @@ if __name__ == "__main__":
     ax.set_yticks(range(len(CLASSES)), CLASSES)
     ax.set_xlabel("predicted")
     ax.set_ylabel("true")
-    ax.set_title(f"Full run ({TAG}): validation confusion matrix (n_val={len(y_val)})")
+    ax.set_title(f"Full run ({EXPERIMENT}): validation confusion matrix (n_val={len(y_val)})")
     for i in range(len(CLASSES)):
         for j in range(len(CLASSES)):
             count = cm.to_numpy()[i, j]
@@ -206,5 +254,5 @@ if __name__ == "__main__":
             ax.text(j, i, str(count), ha="center", va="center", color=color)
     fig.colorbar(im, ax=ax, label="count")
     fig.tight_layout()
-    fig.savefig(OUT_DIR / f"validation_{TAG}.png", dpi=150)
-    print(f"Saved {OUT_DIR / f'validation_{TAG}.png'}")
+    fig.savefig(OUT_DIR / "validation.png", dpi=150)
+    print(f"Saved {OUT_DIR / 'validation.png'}")

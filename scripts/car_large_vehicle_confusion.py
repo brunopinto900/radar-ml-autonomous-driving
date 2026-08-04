@@ -16,9 +16,10 @@ from histogram_features import FEATURES, N_BINS  # noqa: E402
 from train_mlp import CLASSES  # noqa: E402
 from train_mlp_full import HIDDEN_DIM, PaperMLP  # noqa: E402
 
-OUT_DIR = RESULTS_DIR / "mlp_full_run"
+RUN_DIR = RESULTS_DIR / "mlp_full_run"
 CACHE_DIR = RESULTS_DIR / "mlp_feature_cache"
-MODEL_PATH = OUT_DIR / "model_20epoch.pt"
+MODEL_PATH = RUN_DIR / "baseline_20epoch_h16" / "model.pt"
+OUT_DIR = RUN_DIR / "large_vehicle_car_confusion"
 
 
 if __name__ == "__main__":
@@ -62,6 +63,7 @@ if __name__ == "__main__":
     ax.invert_yaxis()
     fig.tight_layout()
 
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     path = OUT_DIR / "car_large_vehicle_confusion.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")

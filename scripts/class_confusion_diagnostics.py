@@ -8,8 +8,10 @@ predicted large_vehicle" and "misclassified as car" that the actual numbers
 caught - a violin shows each group's density shape directly instead of
 requiring the eye to judge density from raw point overlap, and the table
 means/medians are printed alongside so nothing needs to be read off the plot
-by eye either. Edit TRUE_CLASS to switch which class this runs for. Reuses
-the saved 20-epoch checkpoint and cached val features, no retraining.
+by eye either. Edit TRUE_CLASS to switch which class this runs for, and
+MODEL_EXPERIMENT/HIDDEN_DIM to point at a different saved checkpoint (e.g. a
+capacity-ablation run) - see MLP_FINDINGS.md. Reuses a saved checkpoint and
+cached val features, no retraining.
 """
 import numpy as np
 import pandas as pd
@@ -22,13 +24,24 @@ import matplotlib.pyplot as plt  # noqa: E402
 from dataloader import RESULTS_DIR  # noqa: E402
 from histogram_features import FEATURES, GROUP_KEY, N_BINS, add_relative_xy  # noqa: E402
 from train_mlp import CLASSES  # noqa: E402
-from train_mlp_full import HIDDEN_DIM, PaperMLP  # noqa: E402
+from train_mlp_full import PaperMLP  # noqa: E402
 
-OUT_DIR = RESULTS_DIR / "mlp_full_run"
+RUN_DIR = RESULTS_DIR / "mlp_full_run"
 CACHE_DIR = RESULTS_DIR / "mlp_feature_cache"
-MODEL_PATH = OUT_DIR / "model_20epoch.pt"
 
-TRUE_CLASS = "car"
+MODEL_EXPERIMENT = "baseline_20epoch_h16"  # which trained checkpoint to diagnose - folder
+                                            # under results/mlp_full_run/, e.g.
+                                            # "capacity_ablation_h64" for the section-5 rerun
+HIDDEN_DIM = 16  # must match that experiment's architecture
+MODEL_PATH = RUN_DIR / MODEL_EXPERIMENT / "model.pt"
+
+OUT_DIR = RUN_DIR / "large_vehicle_car_confusion"  # where these plots land - switch to
+                                                    # RUN_DIR / MODEL_EXPERIMENT when
+                                                    # MODEL_EXPERIMENT above is an ablation run,
+                                                    # so its diagnostics land alongside it
+                                                    # (e.g. section 5's capacity_ablation_h64)
+
+TRUE_CLASS = "large_vehicle"
 
 METRICS = {
     "n_points": "point count (per instance)",
@@ -69,7 +82,7 @@ def plot_metric(keys: pd.DataFrame, classes: list[str], true_class: str, metric:
     ax.set_ylim(-0.7, len(classes) - 0.3)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("model's prediction")
-    ax.set_title(f"true {true_class} instances (n={len(keys)}): {metric} vs. prediction (val, 20-epoch model)")
+    ax.set_title(f"true {true_class} instances (n={len(keys)}): {metric} vs. prediction (val, {MODEL_EXPERIMENT})")
     ax.grid(True, axis="x", alpha=0.3)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -107,8 +120,10 @@ if __name__ == "__main__":
     keys["correct"] = keys["pred_name"] == TRUE_CLASS
     keys = keys.merge(per_instance, on=GROUP_KEY, how="left")
 
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     for metric, xlabel in METRICS.items():
-        plot_metric(keys, CLASSES, TRUE_CLASS, metric, xlabel, OUT_DIR / f"{TRUE_CLASS}_{metric}_vs_prediction.png")
+        path = OUT_DIR / f"{TRUE_CLASS}_{metric}_vs_prediction.png"
+        plot_metric(keys, CLASSES, TRUE_CLASS, metric, xlabel, path)
 
     agg = {"n": ("pred_name", "size")}
     for metric in METRICS:
@@ -116,7 +131,7 @@ if __name__ == "__main__":
         agg[f"{metric}_median"] = (metric, "median")
     summary = keys.groupby("pred_name").agg(**agg).round(2).reindex(CLASSES).dropna(how="all")
 
-    print(f"\nTrue {TRUE_CLASS} instances (n={true_mask.sum()}), grouped by predicted class:\n")
+    print(f"\nTrue {TRUE_CLASS} instances (n={true_mask.sum()}), grouped by predicted class ({MODEL_EXPERIMENT}):\n")
     print(summary.to_string())
 
     summary_path = OUT_DIR / f"{TRUE_CLASS}_confusion_summary.csv"
