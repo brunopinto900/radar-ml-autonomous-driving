@@ -56,14 +56,18 @@ class OneHiddenLayerMLP(nn.Module):
         return self.net(x)
 
 
-def load_or_build_dataset(df: pd.DataFrame, bin_edges: dict, classes: list[str],
-                           cache_name: str) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+def load_or_build_dataset(df: pd.DataFrame, bin_edges: dict, classes: list[str], cache_name: str,
+                           include_n_points: bool = False, include_vr_rel: bool = False,
+                           replace_vr_with_vr_rel: bool = False) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Loads cached feature vectors (+ instance keys) if present, otherwise
     builds and caches them. Building the full dataset takes ~3.5 min measured
     (169s train + 32s val) - caching turns that into a one-time cost instead of
     paying it on every run. Cache is keyed only by name (train/val) - delete
     results/mlp_feature_cache/ if FEATURES/N_BINS in histogram_features.py ever
-    change, nothing here detects that automatically."""
+    change, nothing here detects that automatically. Callers using
+    include_n_points/include_vr_rel=True must pass a cache_name that isn't
+    shared with the 80-dim runs (e.g. a "_pc"/"_vr"/"_vrswap" suffix) - the
+    dimensionality isn't checked here."""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     x_path = CACHE_DIR / f"{cache_name}_X.npy"
     y_path = CACHE_DIR / f"{cache_name}_y.npy"
@@ -72,7 +76,8 @@ def load_or_build_dataset(df: pd.DataFrame, bin_edges: dict, classes: list[str],
         print(f"Loading cached {cache_name} features from {x_path}")
         return np.load(x_path), np.load(y_path), pd.read_parquet(keys_path)
     print(f"Building {cache_name} features (no cache found - takes a few minutes for the full split)")
-    X, y, keys = build_dataset(df, bin_edges, classes)
+    X, y, keys = build_dataset(df, bin_edges, classes, include_n_points, include_vr_rel,
+                                replace_vr_with_vr_rel)
     np.save(x_path, X)
     np.save(y_path, y)
     keys.to_parquet(keys_path)

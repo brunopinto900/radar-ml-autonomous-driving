@@ -22,7 +22,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 from dataloader import RESULTS_DIR, plot_predictions_grid  # noqa: E402
-from histogram_features import FEATURES, GROUP_KEY, N_BINS, add_relative_xy, fit_bin_edges  # noqa: E402
+from histogram_features import (FEATURES, GROUP_KEY, N_BINS, add_relative_vr,  # noqa: E402
+                                 add_relative_xy, fit_bin_edges)
 from train_mlp import CLASSES, class_weights, load_or_build_dataset  # noqa: E402
 
 OUT_ROOT = RESULTS_DIR / "mlp_full_run"
@@ -53,10 +54,32 @@ MIN_VAL_POINTS = 1  # >1 drops sparse instances from VALIDATION too - answers a 
                     # be expected to get right" - i.e. is the min-train-points checkpoint's
                     # poor overall val accuracy just it being scored on cases (sparse val
                     # instances) it was never trained to handle in the first place.
+INCLUDE_N_POINTS = False  # appends n_points as an explicit 81st input dim (MLP_FINDINGS.md
+                          # section 7) - ~fully redundant with the existing 80 dims in
+                          # principle (r=0.985-0.997 with each block's own sum), so this tests
+                          # whether removing the optimization burden of re-deriving it helps
+                          # this small/slowly-trained network, against the real risk of
+                          # amplifying the large_vehicle shortcut already observed (section 6).
+                          # Uses separate "_pc"-suffixed caches, doesn't touch the 80-dim ones.
+INCLUDE_VR_REL = False  # appends (or, with REPLACE_VR_WITH_VR_REL below, swaps in for
+                       # vr_compensated) a 16-bin vr_rel block (Doppler spread / micro-Doppler,
+                       # median-centered, explicit +-3.0 m/s range - histogram_features.py's
+                       # VR_REL_RANGE) - real signal validated in FEATURE_MAP.md but deferred
+                       # from the paper-faithful v1 baseline (MLP_DESIGN.md), unlike
+                       # INCLUDE_N_POINTS this is NOT redundant with any existing feature.
+REPLACE_VR_WITH_VR_REL = False  # only matters if INCLUDE_VR_REL=True. False (default): vr_rel
+                               # is a 6th block ADDED alongside vr_compensated (81/96-dim).
+                               # True: vr_rel SWAPS IN for vr_compensated in place, staying at
+                               # 80-dim - tests vr_rel as a replacement, not an addition
+                               # (MLP_FINDINGS.md section 9). Uses separate "_vr"/"_vrswap"
+                               # -suffixed caches, doesn't touch the plain 80-dim ones.
 
-EXPERIMENT = "baseline_20epoch_h16"  # output subfolder under results/mlp_full_run/ - set this
-                                      # together with HIDDEN_DIM/EPOCHS/MIN_TRAIN_POINTS/
-                                      # MIN_VAL_POINTS above when running an ablation, e.g.
+EXPERIMENT = "baseline_20epoch_h16"  # output subfolder under results/mlp_full_run/ - set
+                                      # this together with HIDDEN_DIM/EPOCHS/
+                                      # MIN_TRAIN_POINTS/MIN_VAL_POINTS/INCLUDE_N_POINTS/
+                                      # INCLUDE_VR_REL/REPLACE_VR_WITH_VR_REL above when
+                                      # running an ablation, e.g. "vr_rel_feature",
+                                      # "vr_rel_replace_feature", "point_count_feature",
                                       # "capacity_ablation_h64", "min_train_points_ablation",
                                       # "epoch_ablation_1000epoch",
                                       # "min_train_points_epoch_matched"
@@ -86,8 +109,13 @@ if __name__ == "__main__":
 
     train_df = add_relative_xy(pd.read_parquet(RESULTS_DIR / "train_points.parquet"))
     val_df = add_relative_xy(pd.read_parquet(RESULTS_DIR / "val_points.parquet"))
-    bin_edges = fit_bin_edges(train_df)  # fit on the FULL unfiltered train split always -
-                                          # keeps this the same variable as the canonical run.
+    if INCLUDE_VR_REL:
+        train_df = add_relative_vr(train_df)
+        val_df = add_relative_vr(val_df)
+    bin_edges = fit_bin_edges(train_df, INCLUDE_VR_REL)  # fit on the FULL unfiltered train
+                                          # split always - keeps this the same variable as the
+                                          # canonical run (vr_rel's own edges are an explicit
+                                          # range, not fit from data - see VR_REL_RANGE).
 
     train_cache_name = "train"
     if MIN_TRAIN_POINTS > 1:
@@ -109,14 +137,29 @@ if __name__ == "__main__":
         print(f"Filtered val instances: {n_before_val} -> {len(keep_keys_val)} "
               f"(dropped {n_before_val - len(keep_keys_val)} with <{MIN_VAL_POINTS} points)")
 
-    X_train, y_train, keys_train = load_or_build_dataset(train_df, bin_edges, CLASSES, train_cache_name)
-    X_val, y_val, keys_val = load_or_build_dataset(val_df, bin_edges, CLASSES, val_cache_name)
+    if INCLUDE_N_POINTS:
+        train_cache_name += "_pc"
+        val_cache_name += "_pc"
+    if INCLUDE_VR_REL:
+        train_cache_name += "_vrswap" if REPLACE_VR_WITH_VR_REL else "_vr"
+        val_cache_name += "_vrswap" if REPLACE_VR_WITH_VR_REL else "_vr"
+
+    X_train, y_train, keys_train = load_or_build_dataset(
+        train_df, bin_edges, CLASSES, train_cache_name, INCLUDE_N_POINTS, INCLUDE_VR_REL,
+        REPLACE_VR_WITH_VR_REL)
+    X_val, y_val, keys_val = load_or_build_dataset(
+        val_df, bin_edges, CLASSES, val_cache_name, INCLUDE_N_POINTS, INCLUDE_VR_REL,
+        REPLACE_VR_WITH_VR_REL)
     print(f"train: {len(y_train)} instances, val: {len(y_val)} instances")
 
     X_train_t, y_train_t = torch.tensor(X_train), torch.tensor(y_train)
     X_val_t, y_val_t = torch.tensor(X_val), torch.tensor(y_val)
 
-    model = PaperMLP(in_dim=len(FEATURES) * N_BINS, hidden_dim=HIDDEN_DIM, n_classes=len(CLASSES))
+    in_dim = len(FEATURES) * N_BINS
+    if INCLUDE_VR_REL and not REPLACE_VR_WITH_VR_REL:
+        in_dim += N_BINS
+    in_dim += 1 if INCLUDE_N_POINTS else 0
+    model = PaperMLP(in_dim=in_dim, hidden_dim=HIDDEN_DIM, n_classes=len(CLASSES))
     loss_fn = nn.CrossEntropyLoss(weight=class_weights(y_train, len(CLASSES)))
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
