@@ -572,15 +572,71 @@ genuine feature overlap for a subpopulation of buses (sparse `car`-vs-`bus` AUC 
 train instances) staying genuinely thin to learn a bus's full shape from is a separate, real
 concern - different mechanism than loss weighting, and not something reweighting can fix.
 
+**Dug into why the gain landed on `car`/`pedestrian_group` instead of `large_vehicle`, two ways
+(`scripts/regroup_large_vehicle_confusion_diagnostics.py`,
+`scripts/regroup_per_class_accuracy.py`), both against the converged 1000-epoch checkpoint.**
+
+*1. Correct vs. misclassified-as-car `large_vehicle` (bus) instances, same method as section 4's
+original deep dive:*
+
+| group (n) | n_points (mean/median) | extent (mean/median) | vr_rel_std (mean/median) |
+|---|---|---|---|
+| correct (401) | 10.4 / 9.0 | 14.2m / 15.1m | 2.17 / 0.026 |
+| wrong-as-car (323) | 8.5 / 6.0 | 10.8m / **14.8m** | 1.36 / **0.023** |
+
+Point count still separates them, but extent and Doppler spread barely do **by median** (14.8m
+vs. 15.1m; 0.023 vs. 0.026 - both means differ more, driven by outliers, not a typical-case
+difference). This is a different mechanism than the original truck-driven confusion (section
+10 above), where extent was the dominant, clean signal (0.79m vs. 2.84m). The typical
+misclassified bus here is *not* small - it's still a ~15m object - it just has fewer points.
+
+*2. Per-class val accuracy tracked every epoch, not just at the final checkpoint:*
+
+| epoch | car | large_vehicle | pedestrian | pedestrian_group | two_wheeler |
+|---|---|---|---|---|---|
+| 20 | 0.812 | 0.586 | 0.900 | 0.530 | 0.912 |
+| 100 | 0.856 | **0.601 (peak)** | 0.911 | 0.535 | 0.926 |
+| 500 | 0.850 | 0.590 | 0.899 | 0.553 | 0.924 |
+| 1000 | 0.855 | 0.549 | 0.886 | **0.578** | 0.917 |
+
+`car`/`two_wheeler` stabilize by ~epoch 100 and stay flat. `large_vehicle` peaks around epoch
+80-140 then **declines steadily for the next 800+ epochs**; `pedestrian` shows the same slow
+late decline. `pedestrian_group` is flat until ~epoch 400, then climbs the rest of the way -
+gaining specifically at `large_vehicle`'s and `pedestrian`'s expense, not `car`'s. At epoch 100,
+balanced accuracy is actually *higher* (~76.6%) than the converged epoch-1000 value (75.7%),
+with much better `large_vehicle` (0.601 vs. 0.549) and `pedestrian` (0.911 vs. 0.886) recall -
+raw accuracy is slightly lower (~76.9% vs. 77.6%). **Open question, not resolved:** which
+checkpoint is actually the fair/right comparison point is now unclear - "train to cost
+plateau" (the rule used everywhere else in this document, section 2) may not be the right
+criterion once per-class trajectories diverge like this.
+
+**Open hypothesis, not yet tested: a magnitude/shape confound (same mechanism as section 7,
+new symptom).** Section 7 already established these histograms are raw counts, not density,
+and that a block's total count reconstructs `n_points` almost exactly (r=0.985-0.997) - point
+count and histogram *magnitude* are nearly the same signal. A 9-point bus and a 6-point bus can
+have identical *extent* (which bins have any points at all - confirmed above, ~15m either way)
+but very different *magnitude* (how many counts land in those bins). If the model leans on
+magnitude rather than "which bins are populated," a huge-but-thinly-sampled bus would produce a
+histogram that looks structurally more like a small car's (low counts everywhere) than a
+well-sampled bus's (high counts spread wide) - the same underlying confound section 7 found for
+the point-count/class-sum correlation, now potentially showing up as a behavioral symptom
+rather than just a correlational one. Cheap way to check if pursued later: compare
+density-normalized (count/n_points) histograms for correct vs. wrong-as-car buses instead of
+raw counts - no retraining needed, same kind of stat check as the rest of section 10.
+
 Files (this result): `scripts/train_mlp_regroup.py`
 (`results/mlp_full_run/car_large_vehicle_regroup/`,
-`results/mlp_full_run/car_large_vehicle_regroup_1000epoch/`).
+`results/mlp_full_run/car_large_vehicle_regroup_1000epoch/`),
+`scripts/regroup_large_vehicle_confusion_diagnostics.py`,
+`scripts/regroup_per_class_accuracy.py`
+(`results/mlp_full_run/car_large_vehicle_regroup_1000epoch/per_class_accuracy.png`).
 
 Files (section 10 overall): `scripts/large_vehicle_subtype_analysis.py`,
 `scripts/large_vehicle_subtype_histograms.py`
 (`results/mlp_full_run/large_vehicle_car_confusion/subtype_histograms.png` +
 `subtype_histograms_stats.csv`), `scripts/truck_bus_car_separability.py`
-(`results/mlp_full_run/truck_bus_separability/results.txt`), `scripts/train_mlp_regroup.py`.
+(`results/mlp_full_run/truck_bus_separability/results.txt`), `scripts/train_mlp_regroup.py`,
+`scripts/regroup_large_vehicle_confusion_diagnostics.py`, `scripts/regroup_per_class_accuracy.py`.
 
 ## 11. Conclusion: single-frame point-cloud sparsity is the project's binding constraint
 
