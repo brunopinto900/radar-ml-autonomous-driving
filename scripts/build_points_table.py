@@ -11,6 +11,11 @@ from dataloader import DATA_ROOT, LABELS, OBJECT_ATTRS, RESULTS_DIR
 
 SENSOR_ID = 2  # front-right corner radar (sensors.json: x=3.86, y=-0.7) - single sensor for now
 
+ALL_SEQUENCES = sorted(
+    (p.name for p in DATA_ROOT.iterdir() if p.is_dir() and p.name.startswith("sequence_")),
+    key=lambda name: int(name.split("_")[1]),
+)
+
 def sequence_points(sequence_name: str, sensor_id: int = SENSOR_ID) -> pd.DataFrame:
     """One row per point, restricted to one sensor's points belonging to a tracked object."""
     with h5py.File(DATA_ROOT / sequence_name / "radar_data.h5", "r") as f:
@@ -31,11 +36,17 @@ def build_points_table(sequence_names: list[str]) -> pd.DataFrame:
 
 
 def build_and_save_points_table(sequence_names: list[str] | None = None, table_path=None) -> pd.DataFrame:
-    """Build the points table and save it as a parquet file. Returns the table."""
+    """Build the points table and save it as a parquet file. Returns the table.
+
+    Skips rebuilding if table_path already exists - delete it first to force a rebuild."""
     if sequence_names is None:
-        sequence_names = [f"sequence_{i}" for i in range(1, 6)]  # small subset for a first pass
+        sequence_names = ALL_SEQUENCES
     if table_path is None:
         table_path = RESULTS_DIR / "points_table.parquet"
+
+    if table_path.exists():
+        print(f"{table_path} already exists, skipping build")
+        return pd.read_parquet(table_path)
 
     df = build_points_table(sequence_names)
     n_instances = df.groupby(["sequence_name", "timestamp", "track_id"]).ngroups
