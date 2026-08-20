@@ -65,16 +65,25 @@ def fit_bin_edges(train_df: pd.DataFrame, include_vr_rel: bool = False) -> dict[
 
 def instance_vector(points: pd.DataFrame, bin_edges: dict[str, np.ndarray],
                      include_n_points: bool = False, include_vr_rel: bool = False,
-                     replace_vr_with_vr_rel: bool = False) -> np.ndarray:
-    """One instance's points -> concatenated histogram vector (raw counts, not
-    density - see MLP_DESIGN.md). Layout depends on the vr_rel flags:
-    include_vr_rel=True alone APPENDS a 6th vr_rel block after the 5 FEATURES
-    blocks (81/96-dim, tests vr_rel as added information); with
+                     replace_vr_with_vr_rel: bool = False,
+                     normalize_density: bool = False) -> np.ndarray:
+    """One instance's points -> concatenated histogram vector (raw counts by
+    default, not density - see MLP_DESIGN.md). Layout depends on the vr_rel
+    flags: include_vr_rel=True alone APPENDS a 6th vr_rel block after the 5
+    FEATURES blocks (81/96-dim, tests vr_rel as added information); with
     replace_vr_with_vr_rel=True too, vr_rel instead SWAPS IN for
     vr_compensated in place (still 5 blocks, 80-dim, tests vr_rel as a
-    replacement rather than an addition - MLP_FINDINGS.md section 9). A scalar
-    n_points, if included, is always appended last. All three flags are off by
-    default since they change the vector's dimensionality."""
+    replacement rather than an addition - MLP_FINDINGS.md section 9).
+    normalize_density=True divides the histogram blocks (not n_points) by
+    len(points), turning raw counts into each bin's share of the instance's
+    own points - tests the magnitude/shape confound hypothesis (MLP_FINDINGS.md
+    section 10): shares are unaffected for 1-point instances (1/1 = 1, same as
+    raw), only changes anything for instances with >=2 points. A scalar
+    n_points, if included, is always appended last, AFTER normalization, so it
+    stays a raw count even when normalize_density=True - the point is to
+    decouple shape (normalized) from magnitude (raw n_points), not lose
+    magnitude entirely. All flags are off by default since they change the
+    vector's dimensionality or values."""
     if include_vr_rel and replace_vr_with_vr_rel:
         cols = [c if c != "vr_compensated" else "vr_rel" for c in FEATURES]
     elif include_vr_rel:
@@ -84,6 +93,8 @@ def instance_vector(points: pd.DataFrame, bin_edges: dict[str, np.ndarray],
     vec = np.concatenate(
         [np.histogram(points[col], bins=bin_edges[col])[0] for col in cols]
     ).astype(np.float32)
+    if normalize_density:
+        vec = vec / len(points)
     if include_n_points:
         vec = np.append(vec, len(points)).astype(np.float32)
     return vec
@@ -91,7 +102,8 @@ def instance_vector(points: pd.DataFrame, bin_edges: dict[str, np.ndarray],
 
 def build_dataset(df: pd.DataFrame, bin_edges: dict[str, np.ndarray], classes: list[str],
                    include_n_points: bool = False, include_vr_rel: bool = False,
-                   replace_vr_with_vr_rel: bool = False) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+                   replace_vr_with_vr_rel: bool = False,
+                   normalize_density: bool = False) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     """Full (X, y, keys) for every instance in df. y is an integer class index
     into `classes` (same order as MLP_DESIGN.md's output layer). keys is a
     DataFrame (GROUP_KEY columns, same row order as X/y) so a prediction can be
@@ -101,7 +113,7 @@ def build_dataset(df: pd.DataFrame, bin_edges: dict[str, np.ndarray], classes: l
     X, y, keys = [], [], []
     for key, points in df.groupby(GROUP_KEY):
         X.append(instance_vector(points, bin_edges, include_n_points, include_vr_rel,
-                                  replace_vr_with_vr_rel))
+                                  replace_vr_with_vr_rel, normalize_density))
         y.append(class_to_idx[points["class_name"].iloc[0]])
         keys.append(key)
     keys_df = pd.DataFrame(keys, columns=GROUP_KEY)

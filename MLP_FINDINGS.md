@@ -677,6 +677,82 @@ re-weighting, or re-labeling the same sparse snapshot - is temporal accumulation
 consecutive scans of the same track (see Next steps: sensor fusion is the adjacent, also
 untested, information-adding lever).
 
+## 12. Follow-up: density-normalized histograms confirm the magnitude/shape hypothesis (modestly), and expose a deeper training-dynamics issue
+
+*Draft - written as a starting point, not finalized (see [[feedback_code_delegation]] on findings-doc ownership).*
+
+Tests section 10's open hypothesis directly: histogram blocks normalized to each bin's *share*
+of the instance's own points (density) instead of raw counts, with `n_points` kept as an
+explicit 81st feature so magnitude isn't discarded, just decoupled from shape
+(`histogram_features.py`'s `normalize_density` flag, `scripts/train_mlp_density_regroup.py`,
+combined with section 10's car=car+truck+large_vehicle(raw)/large_vehicle=bus-only grouping).
+
+**Result, converged (1000 epochs, same plateau check as elsewhere in this doc):**
+
+| class | regroup, raw counts (converged) | regroup + density-norm (converged) | Δ |
+|---|---|---|---|
+| car | 85.5% | 85.4% | ~0 |
+| large_vehicle | 54.9% | **60.4%** | **+5.5pp** |
+| pedestrian | 88.6% | 88.5% | ~0 |
+| pedestrian_group | 57.8% | 57.3% | ~0 |
+| two_wheeler | 91.7% | 91.6% | ~0 |
+| raw accuracy | 77.6% | 77.5% | ~0 |
+| balanced accuracy | 75.7% | **76.6%** | +0.9pp |
+
+Real, but modest - confirms the magnitude/shape confound was genuine, not the dramatic fix a
+50-epoch snapshot initially suggested (that snapshot showed `large_vehicle` at 76.6% and
+balanced accuracy at 78.8% - both dropped substantially by convergence, see below).
+
+**Same early-peak-then-decline pattern as section 10's plain regroup result, sharper here.**
+`large_vehicle` recall: 76.6% at 50 epochs -> 60.4% at 1000 epochs (-16.2pp). Balanced accuracy
+was actually *higher* at 50 epochs (78.8%) than at convergence (76.6%) - the second time in
+this investigation an early checkpoint has overstated a `large_vehicle` win that partly
+reverses with more training (`scripts/regroup_per_class_accuracy.py` showed the same direction
+for the raw-count regroup, just smaller: 0.601 peak -> 0.549 converged).
+
+**Per-epoch failure-profile diagnostic** (`scripts/regroup_epoch_failure_profile.py`) - tracked,
+at every epoch, the feature profile of true `large_vehicle` instances misclassified as `car`,
+not just the aggregate accuracy curve:
+
+| epoch | n_fail (/730) | n_points (mean) | extent (mean) | mean_rcs | mean_vr_compensated |
+|---|---|---|---|---|---|
+| 6 | 7 | 1.57 | 0.48 | 9.93 | -4.84 |
+| 11 | 56 | 1.46 | 0.79 | 13.02 | 3.67 |
+| 21 | 116 | 2.26 | 3.47 | 12.40 | 6.05 |
+| 31 | 128 | 2.40 | 4.01 | 11.88 | 6.45 |
+| 41 | 145 | 2.81 | 5.42 | 11.23 | 7.36 |
+| 46 | 157 | 3.17 | 6.18 | 10.77 | 8.01 |
+
+The failing population isn't a fixed, stable "hard core" - failure count, `n_points`, `extent`,
+and `mean_vr_compensated` all climb together and roughly monotonically from epoch ~8 onward.
+The failing subset's extent stays well below the full `large_vehicle` population's ~14-15m
+average throughout (not simple regression to the population mean as the failing sample grows),
+so this looks like the decision boundary itself gradually creeping to swallow progressively
+larger, more Doppler-active buses over training, not just sampling noise - though that
+alternative explanation isn't fully ruled out.
+
+**Why, despite class-weighted loss?** Checked directly rather than assumed: `w_i = N/(C*N_i)`
+makes each class's *total, expected* loss contribution equal (`w_i * N_i = N/C`, constant
+across classes - `large_vehicle`'s weight is 8.83 vs. `car`'s 0.38, 23x higher, section 10).
+That rules out "no incentive" as an explanation (section 10 already established this). What
+weighting does *not* fix: `large_vehicle`'s signal comes from 8,024 examples individually
+pushed hard; `car`'s comes from 185,411 examples individually pushed gently - same expected
+total, but very different gradient variance (a mean from fewer, heavily-weighted samples is
+noisier than a mean from many lightly-weighted ones), and in the region where the two classes
+genuinely overlap (separability probe, sparse AUC down to 0.811), the *number* of gradient
+updates nudging the boundary toward `car` there still scales with `car`'s raw count, not its
+down-weighted magnitude. Weighting equalizes the size of each push, not how many times a class
+gets to push near the boundary. Plausible mechanism for the fast-early-gain/slow-erosion
+pattern, consistent with everything observed - **not directly measured** (would need per-class
+gradient variance tracked over epochs, not done here), flagged as a hypothesis, not a
+confirmed result.
+
+Files: `scripts/train_mlp_density_regroup.py`
+(`results/mlp_full_run/density_norm_regroup_50epoch/`,
+`results/mlp_full_run/density_norm_regroup_1000epoch/`),
+`scripts/regroup_epoch_failure_profile.py`
+(`results/mlp_full_run/density_norm_regroup_50epoch/epoch_failure_profile.csv` + `.png`).
+
 ## Next steps (not yet decided, not ranked)
 
 - **Explicit point-count feature is tested** (section 8) - small, mixed effect (+0.2pp overall,
