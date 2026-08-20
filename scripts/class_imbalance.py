@@ -8,8 +8,12 @@ from dataloader import LABELS, RESULTS_DIR, sensor_label
 
 NAME_TO_COLOR = {name: color for name, color in LABELS.values()}
 
-if __name__ == "__main__":
-    table_path = RESULTS_DIR / "points_table.parquet"
+
+def plot_class_imbalance(table_path=None):
+    """Load the points table, count object instances per class, and plot/save a
+    log-scale bar chart. Returns (counts, fig)."""
+    if table_path is None:
+        table_path = RESULTS_DIR / "points_table.parquet"
     df = pd.read_parquet(table_path)
     print(f"Loaded {len(df)} points from {table_path}")
 
@@ -34,3 +38,9 @@ if __name__ == "__main__":
     plot_path = RESULTS_DIR / "class_counts.png"
     fig.savefig(plot_path, dpi=150)
     print(f"Saved plot to {plot_path}")
+
+    return counts, fig
+
+
+if __name__ == "__main__":
+    plot_class_imbalance()

@@ -3,3 +3,4 @@ data/
 TODO.md
 results/
 __pycache__/
+.ipynb_checkpoints/
