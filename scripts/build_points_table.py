@@ -38,15 +38,20 @@ def build_points_table(sequence_names: list[str]) -> pd.DataFrame:
 def build_and_save_points_table(sequence_names: list[str] | None = None, table_path=None) -> pd.DataFrame:
     """Build the points table and save it as a parquet file. Returns the table.
 
-    Skips rebuilding if table_path already exists - delete it first to force a rebuild."""
+    Skips rebuilding if table_path already exists AND covers exactly the requested
+    sequence_names - otherwise rebuilds (e.g. a cached full-158-sequence table won't be
+    silently returned for a request for just a couple of sequences)."""
     if sequence_names is None:
         sequence_names = ALL_SEQUENCES
     if table_path is None:
         table_path = RESULTS_DIR / "points_table.parquet"
 
     if table_path.exists():
-        print(f"{table_path} already exists, skipping build")
-        return pd.read_parquet(table_path)
+        cached_sequences = set(pd.read_parquet(table_path, columns=["sequence_name"])["sequence_name"])
+        if cached_sequences == set(sequence_names):
+            print(f"{table_path} already covers exactly the requested sequences, skipping build")
+            return pd.read_parquet(table_path)
+        print(f"{table_path} exists but covers different sequences than requested, rebuilding")
 
     df = build_points_table(sequence_names)
     n_instances = df.groupby(["sequence_name", "timestamp", "track_id"]).ngroups

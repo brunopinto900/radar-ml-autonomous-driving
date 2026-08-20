@@ -1,10 +1,7 @@
-"""large_vehicle / truck / bus taxonomy check: overlaid per-feature histograms, to see how
-much these classes actually overlap before deciding whether merging them (Design_Decisions.md
-decision 1) is justified.
-
-rcs / vr_compensated are raw per-point values, x_rel / y_rel are also per-point, but each point's position relative to its own instance's
-centroid (needs that instance's full point cloud to compute the centroid), doppler_spread is one value per instance: median absolute deviation of
-vr_compensated within that instance (median-based, not std, to stay robust to outliers).
+"""large_vehicle / truck / bus taxonomy check: is merging them (Design_Decisions.md decision 1)
+actually justified? Builds per-instance features (rcs, vr_compensated, x_extent, y_extent,
+doppler_spread) and runs a class-weighted logistic regression + random forest separability
+probe on a sequence-grouped held-out split, with per-class one-vs-rest and pairwise ROC-AUC.
 """
 from itertools import combinations
 
@@ -20,7 +17,6 @@ from sklearn.preprocessing import StandardScaler
 from dataloader import LABELS, RESULTS_DIR
 
 TAXONOMY_CLASSES = ["large_vehicle", "truck", "bus"]
-POINT_FEATURES = ["rcs", "vr_compensated", "x_rel", "y_rel"]
 PROBE_FEATURES = ["rcs", "vr_compensated", "x_extent", "y_extent", "doppler_spread"]
 NAME_TO_COLOR = {name: color for name, color in LABELS.values()}
 
@@ -61,47 +57,6 @@ def doppler_spread_diagnostics(df: pd.DataFrame, classes: list[str] = TAXONOMY_C
     summary = pd.DataFrame(rows).set_index("class")
     print(summary.round(2).to_string())
     return summary
-
-
-def plot_taxonomy_histograms(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES, bins: int = 50):
-    """One overlaid-histogram figure per feature (rcs, vr_compensated, x_rel, y_rel,
-    doppler_spread), classes plotted on top of each other (density-normalized so different
-    class sample sizes are comparable). Saves each to results/taxonomy_<feature>.png.
-    Returns {feature: fig}."""
-    df = add_relative_features(df)
-    instances = df.drop_duplicates(["sequence_name", "timestamp", "track_id"])
-    figs = {}
-
-    for feature in POINT_FEATURES:
-        fig, ax = plt.subplots(figsize=(8, 5))
-        for cls in classes:
-            values = df.loc[df["label_name"] == cls, feature]
-            ax.hist(values, bins=bins, density=True, alpha=0.5, label=cls, color=NAME_TO_COLOR[cls])
-        ax.set_xlabel(feature)
-        ax.set_ylabel("density")
-        ax.set_title(f"{feature} by class (per point)")
-        ax.legend()
-        fig.tight_layout()
-        figs[feature] = fig
-
-    fig, ax = plt.subplots(figsize=(8, 5))
-    for cls in classes:
-        values = instances.loc[instances["label_name"] == cls, "doppler_spread"]
-        ax.hist(values, bins=bins, density=True, alpha=0.5, label=cls, color=NAME_TO_COLOR[cls])
-    ax.set_xlabel("doppler_spread (median |vr_compensated - median| per instance)")
-    ax.set_ylabel("density")
-    ax.set_title("doppler_spread by class (per instance)")
-    ax.legend()
-    fig.tight_layout()
-    figs["doppler_spread"] = fig
-
-    RESULTS_DIR.mkdir(exist_ok=True)
-    for feature, fig in figs.items():
-        path = RESULTS_DIR / f"taxonomy_{feature}.png"
-        fig.savefig(path, dpi=150)
-        print(f"Saved {path}")
-
-    return figs
 
 
 def build_instance_features(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES) -> pd.DataFrame:
@@ -239,6 +194,4 @@ if __name__ == "__main__":
     from build_points_table import build_and_save_points_table
 
     df = build_and_save_points_table()
-    #doppler_spread_diagnostics(df)
-    #plot_taxonomy_histograms(df)
     run_separability_probe(df)
