@@ -21,14 +21,33 @@ PROBE_FEATURES = ["rcs", "vr_compensated", "x_extent", "y_extent", "doppler_spre
 NAME_TO_COLOR = {name: color for name, color in LABELS.values()}
 
 
+INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
+DOPPLER_SPREAD_CACHE = RESULTS_DIR / "doppler_spread_cache.parquet"
+
+
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add x_rel/y_rel (point position relative to its instance's centroid, mean-centered)
-    and doppler_spread (per-instance median absolute deviation of vr_compensated). """
+    and doppler_spread (per-instance median absolute deviation of vr_compensated). doppler_spread
+    is the expensive part (~2-3 min at full scale, one Python lambda per instance group), so it's
+    cached to disk keyed by sequence_name and reused if the cache covers the same sequences -
+    same skip-if-covered pattern as build_points_table.py's cache."""
     df = df.copy()
-    group = df.groupby(["sequence_name", "timestamp", "track_id"])
+    group = df.groupby(INSTANCE_COLS)
     df["x_rel"] = df["x_cc"] - group["x_cc"].transform("mean")
     df["y_rel"] = df["y_cc"] - group["y_cc"].transform("mean")
+
+    sequences = set(df["sequence_name"].unique())
+    if DOPPLER_SPREAD_CACHE.exists():
+        cached = pd.read_parquet(DOPPLER_SPREAD_CACHE)
+        if set(cached["sequence_name"].unique()) == sequences:
+            return df.merge(cached, on=INSTANCE_COLS, how="left")
+        print(f"{DOPPLER_SPREAD_CACHE} covers different sequences than requested, recomputing doppler_spread")
+
     df["doppler_spread"] = group["vr_compensated"].transform(lambda vr: (vr - vr.median()).abs().median())
+
+    RESULTS_DIR.mkdir(exist_ok=True)
+    df.drop_duplicates(INSTANCE_COLS)[INSTANCE_COLS + ["doppler_spread"]].to_parquet(DOPPLER_SPREAD_CACHE)
+    print(f"Saved doppler_spread cache to {DOPPLER_SPREAD_CACHE}")
     return df
 
 
@@ -105,22 +124,26 @@ def pairwise_roc_auc(clf, X, y_true, classes: list[str] = TAXONOMY_CLASSES) -> d
     return results
 
 
-def run_separability_probe(
-    df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES, n_splits: int = 5, random_state: int = 0
-):
-    """Class-count-weighted logistic regression AND random forest on [rcs, vr_compensated,
-    x_extent, y_extent, doppler_spread]. Split is grouped by sequence_name (StratifiedGroupKFold,
-    ~1/n_splits held out) - instances from the same sequence share background/weather/vehicle,
-    so an instance-level split would leak sequence-specific signal into "held-out" test data,
-    same leakage risk already flagged for `train` in Design_Decisions.md. For each model,
-    prints a classification_report, per-class one-vs-rest ROC-AUC, and the majority-class
-    baseline accuracy, and plots+saves a row-normalized confusion matrix. Returns
-    {model_name: (report, auc_per_class, fig)}."""
-    features = build_instance_features(df, classes)
-    X = features[PROBE_FEATURES].to_numpy(dtype="float64")
-    y = features["label_name"].to_numpy(dtype=str)
-    groups = features["sequence_name"].to_numpy(dtype=str)
-
+def run_probe(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    classes: list[str],
+    n_splits: int = 5,
+    random_state: int = 0,
+    verbose: bool = True,
+    save_confusion: bool = True,
+    tag: str = "taxonomy",
+) -> dict:
+    """Shared core of the separability probe, feature-set agnostic: sequence-grouped split
+    (StratifiedGroupKFold on `groups`, e.g. sequence_name, ~1/n_splits held out - instances
+    from the same sequence share background/weather/vehicle, so an instance-level split would
+    leak sequence-specific signal into "held-out" test data) with leakage asserts, then
+    class-count-weighted LogisticRegression + RandomForestClassifier, per-class one-vs-rest
+    ROC-AUC. `verbose` gates the classification_report / pairwise-AUC prints - off for sweeps
+    over many configurations where per-run detail is just noise. `save_confusion` gates the
+    row-normalized confusion matrix plot, saved to results/{tag}_confusion_matrix_<model>.png.
+    Returns {model_name: (report, auc_per_class, fig_or_None)}."""
     splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     train_idx, test_idx = next(splitter.split(X, y, groups))
     X_train, X_test = X[train_idx], X[test_idx]
@@ -136,10 +159,10 @@ def run_separability_probe(
     X_test_scaled = scaler.transform(X_test)
 
     weights = class_weights(pd.Series(y_train))
-    print(f"class weights: {weights}")
-
     majority_class = pd.Series(y_train).value_counts().idxmax()
     baseline_acc = (y_test == majority_class).mean()
+    if verbose:
+        print(f"class weights: {weights}")
 
     models = {
         "logistic_regression": (LogisticRegression(max_iter=1000, class_weight=weights), True),
@@ -157,37 +180,52 @@ def run_separability_probe(
         y_pred = clf.predict(X_te)
         y_proba = clf.predict_proba(X_te)
 
-        print(f"\n=== {name} ===")
         report = classification_report(y_test, y_pred)
-        print(report)
-
         auc_scores = roc_auc_score(y_test, y_proba, multi_class="ovr", average=None, labels=clf.classes_)
         auc_per_class = dict(zip(clf.classes_, auc_scores))
-        print("per-class one-vs-rest ROC-AUC:")
-        for cls, auc in auc_per_class.items():
-            print(f"  {cls}: {auc:.3f}")
 
-        if name == "logistic_regression":
-            print("pairwise (one-vs-one) ROC-AUC:")
-            for (a, b), auc in pairwise_roc_auc(clf, X_te, y_test, classes).items():
-                print(f"  {a} vs {b}: {auc:.3f}")
+        if verbose:
+            print(f"\n=== {name} ===")
+            print(report)
+            print("per-class one-vs-rest ROC-AUC:")
+            for cls, auc in auc_per_class.items():
+                print(f"  {cls}: {auc:.3f}")
+            if name == "logistic_regression":
+                print("pairwise (one-vs-one) ROC-AUC:")
+                for (a, b), auc in pairwise_roc_auc(clf, X_te, y_test, classes).items():
+                    print(f"  {a} vs {b}: {auc:.3f}")
+            print(f"majority-class baseline ({majority_class}): {baseline_acc:.3f} accuracy")
 
-        print(f"majority-class baseline ({majority_class}): {baseline_acc:.3f} accuracy")
+        fig = None
+        if save_confusion:
+            cm = confusion_matrix(y_test, y_pred, labels=classes, normalize="true")
+            fig, ax = plt.subplots(figsize=(7, 5.5))
+            ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
+            ax.set_title(f"{tag} - {name}\n(sequence-grouped held-out, row-normalized)")
+            fig.tight_layout()
 
-        cm = confusion_matrix(y_test, y_pred, labels=classes, normalize="true")
-        fig, ax = plt.subplots(figsize=(7, 5.5))
-        ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
-        ax.set_title(f"large_vehicle / truck / bus - {name}\n(sequence-grouped held-out, row-normalized)")
-        fig.tight_layout()
-
-        RESULTS_DIR.mkdir(exist_ok=True)
-        path = RESULTS_DIR / f"taxonomy_confusion_matrix_{name}.png"
-        fig.savefig(path, dpi=150)
-        print(f"Saved {path}")
+            RESULTS_DIR.mkdir(exist_ok=True)
+            path = RESULTS_DIR / f"{tag}_confusion_matrix_{name}.png"
+            fig.savefig(path, dpi=150)
+            if verbose:
+                print(f"Saved {path}")
 
         results[name] = (report, auc_per_class, fig)
 
     return results
+
+
+def run_separability_probe(
+    df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES, n_splits: int = 5, random_state: int = 0
+):
+    """Class-count-weighted logistic regression AND random forest on [rcs, vr_compensated,
+    x_extent, y_extent, doppler_spread], sequence-grouped split. See run_probe for the
+    shared split/train/eval mechanics."""
+    features = build_instance_features(df, classes)
+    X = features[PROBE_FEATURES].to_numpy(dtype="float64")
+    y = features["label_name"].to_numpy(dtype=str)
+    groups = features["sequence_name"].to_numpy(dtype=str)
+    return run_probe(X, y, groups, classes, n_splits=n_splits, random_state=random_state, tag="taxonomy")
 
 
 if __name__ == "__main__":

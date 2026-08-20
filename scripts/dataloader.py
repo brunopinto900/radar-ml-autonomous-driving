@@ -26,6 +26,34 @@ LABELS = {
     11: ("static", "tab:gray"),
 }
 
+# raw label_name -> final training class, per Design_Decisions.md decision 1.
+# None = dropped, not trained on (animal/other_dynamic are low-signal catch-alls; static is
+# never present in points_table.parquet anyway, since it has no track_id to filter on).
+CLASS_GROUPS = {
+    "car": "car",
+    "large_vehicle": "large_vehicle",
+    "truck": "large_vehicle",
+    "train": "large_vehicle",
+    "bus": "bus",
+    "bicycle": "two_wheeler",
+    "motorized_two_wheeler": "two_wheeler",
+    "pedestrian": "pedestrian",
+    "pedestrian_group": "pedestrian_group",
+    "animal": None,
+    "other_dynamic": None,
+    "static": None,
+}
+
+# final training class -> plotting color, kept consistent with LABELS where the name matches
+FINAL_CLASS_COLORS = {
+    "car": "tab:red",
+    "large_vehicle": "tab:orange",
+    "bus": "tab:brown",
+    "two_wheeler": "tab:purple",
+    "pedestrian": "tab:green",
+    "pedestrian_group": "lime",
+}
+
 # sensor_id -> (name, x, y, yaw) mounting position in car coordinates, per RadarScenes'
 # sensors.json (4 radars on the front bumper, all facing forward-ish at different angles)
 SENSORS = {

@@ -64,3 +64,10 @@ bus: The evidence is mixed. bus is well separated from large_vehicle (AUC 0.888)
 **Resolution:** merge large_vehicle into truck (target class name kept as `large_vehicle`, per the official scheme). Keep `bus` as its own class
 
 bus is kept separate despite the mixed pairwise, `run_separability_probe` trains on 5 hand-aggregated scalars (median RCS, median Doppler, two extents, one spread value) rather than full per-instance distributions. Actual classifier will use paper-faithful per-instance histograms. Revisit this later: if bus is still heavily confused with large_vehicle/truck in the real classifier's confusion matrix once real features are used, merge it in then, don't decide it now with a crude probe.
+
+## 2. Histogram bin range: percentile clip, not mean ± kσ
+Two approaches can be used to define a feature’s histogram range while limiting the influence of outliers: [p1, p99], as implemented in feature_distributions.py and bin_count_sweep.py, or the common alternative of mean ± kσ.
+
+We chose the percentile-based approach because mean and standard deviation are themselves sensitive to outliers. This is particularly problematic for skewed or heavy-tailed features such as doppler_spread. For cars, for example, p1=0.0, p50≈0.01, and p99≈14.77, indicating a large concentration of near-zero values combined with a long positive tail rather than a Gaussian distribution. In this case, the tail can inflate σ—the same tail that mean ± kσ is intended to exclude—causing the resulting effective range to remain unnecessarily wide.
+
+Percentiles are based on order statistics and therefore do not make assumptions about the distribution’s shape: [p1, p99] directly defines the range containing the central 98% of observations.
