@@ -21,6 +21,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import RESULTS_DIR  # noqa: E402
 from histogram_features import FEATURES, GROUP_KEY, N_BINS, add_relative_xy  # noqa: E402
 from train_mlp import CLASSES  # noqa: E402

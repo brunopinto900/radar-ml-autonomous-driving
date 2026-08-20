@@ -1,12 +1,12 @@
 """Ad-hoc diagnostic: standard confusion matrix (rows = true class, columns =
-predicted class), restricted to val instances with <=POINT_THRESHOLD points.
-Replaces the earlier stacked-bar version (sparse_instances_by_prediction.py,
-removed) - that plot grouped by prediction, which made "given a true class,
-what does it get predicted as" (the question actually being asked) hard to
-read off the chart directly. A confusion matrix answers that with one row.
-Reuses a saved checkpoint and cached val features (val is always the full/
-unfiltered split, even for checkpoints trained on a filtered train set - see
-MLP_FINDINGS.md), no retraining.
+predicted class), restricted to val instances with >=POINT_THRESHOLD points -
+the dense-only counterpart to sparse_confusion_matrix.py. Run once per
+checkpoint (MODEL_EXPERIMENT/LABEL) to compare, on the identical dense val
+subset, a model trained WITH sparse instances (baseline_20epoch_h16) against
+one trained WITHOUT them (min_train_points_ablation) - the fair test of
+whether removing sparse training data helps, isolated from any difference in
+which instances get scored. Reuses a saved checkpoint and cached val features,
+no retraining.
 """
 import numpy as np
 import pandas as pd
@@ -15,6 +15,10 @@ import torch
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
 
 from dataloader import RESULTS_DIR  # noqa: E402
 from histogram_features import FEATURES, GROUP_KEY, N_BINS  # noqa: E402
@@ -26,14 +30,15 @@ CACHE_DIR = RESULTS_DIR / "mlp_feature_cache"
 
 MODEL_EXPERIMENT = "baseline_20epoch_h16"  # which trained checkpoint to diagnose - folder
                                             # under results/mlp_full_run/, e.g.
-                                            # "min_train_points_ablation" for the min4pts rerun
+                                            # "min_train_points_ablation" for the trained-
+                                            # without-sparse-data comparison
 HIDDEN_DIM = 16  # must match that experiment's architecture
 MODEL_PATH = RUN_DIR / MODEL_EXPERIMENT / "model.pt"
 LABEL = "baseline"  # short name used in this diagnostic's own output filenames below - keep in
                     # sync with MODEL_EXPERIMENT (e.g. "min4pts" for min_train_points_ablation)
 
-OUT_DIR = RUN_DIR / "sparse_subset_diagnostics"
-POINT_THRESHOLD = 3  # instances with n_points <= this are included
+OUT_DIR = RUN_DIR / "dense_subset_diagnostics"
+POINT_THRESHOLD = 4  # instances with n_points >= this are included
 
 
 if __name__ == "__main__":
@@ -55,9 +60,9 @@ if __name__ == "__main__":
     n_points.name = "n_points"
     keys = keys.merge(n_points, on=GROUP_KEY, how="left")
 
-    sparse = keys[keys["n_points"] <= POINT_THRESHOLD]
+    dense = keys[keys["n_points"] >= POINT_THRESHOLD]
 
-    counts = pd.crosstab(sparse["true_name"], sparse["pred_name"]).reindex(
+    counts = pd.crosstab(dense["true_name"], dense["pred_name"]).reindex(
         index=CLASSES, columns=CLASSES, fill_value=0
     )
     row_pct = counts.div(counts.sum(axis=1), axis=0) * 100
@@ -76,8 +81,8 @@ if __name__ == "__main__":
     ax.set_yticks(range(len(CLASSES)), CLASSES)
     ax.set_xlabel("predicted class")
     ax.set_ylabel("true class")
-    ax.set_title(f"confusion matrix, val instances with ≤{POINT_THRESHOLD} points\n"
-                 f"(n={len(sparse)} of {len(keys)} total val instances, {MODEL_EXPERIMENT})")
+    ax.set_title(f"confusion matrix, val instances with ≥{POINT_THRESHOLD} points\n"
+                 f"(n={len(dense)} of {len(keys)} total val instances, {MODEL_EXPERIMENT})")
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label("% of row (true class) total")
     fig.tight_layout()
@@ -87,8 +92,8 @@ if __name__ == "__main__":
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
-    print(f"\nConfusion matrix, val instances with <= {POINT_THRESHOLD} points "
-          f"(n={len(sparse)}), true (rows) x predicted (columns), {MODEL_EXPERIMENT}:\n")
+    print(f"\nConfusion matrix, val instances with >= {POINT_THRESHOLD} points "
+          f"(n={len(dense)}), true (rows) x predicted (columns), {MODEL_EXPERIMENT}:\n")
     print(counts.to_string())
 
     summary_path = OUT_DIR / f"confusion_{LABEL}.csv"

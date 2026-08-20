@@ -119,7 +119,7 @@ deliberately deferred to `TODO.md`'s v1.1 future work - build the paper-faithful
 first, add the extensions once it's working, not before.
 
 **Bin count: 16 bins per feature, uniform across all five.** Checked with
-`scripts/bin_sweep.py` - a population-level (all points, all instances of a class, pooled;
+`scripts/investigations/bin_sweep.py` - a population-level (all points, all instances of a class, pooled;
 individual instances are usually far too few points to meaningfully validate bin count on
 their own) sweep of [8, 16, 32, 64] bins per feature, by class. Findings:
 
@@ -143,8 +143,8 @@ choice of one fixed bin count rather than tuning per feature). `vr_compensated` 
 would benefit from finer bins (32) to show its multi-modal structure in full - noted as a
 first candidate for Day 8's iteration pass if results look off, not built in from the start.
 
-Implemented in `scripts/instance_histograms.py` (per-instance histograms, currently `N_BINS =
-8` there - not yet updated to match this decision) and `scripts/bin_sweep.py` (the sweep
+Implemented in `scripts/investigations/instance_histograms.py` (per-instance histograms, currently `N_BINS =
+8` there - not yet updated to match this decision) and `scripts/investigations/bin_sweep.py` (the sweep
 itself, population-level, `results/bin_sweep/`).
 
 ## 4. Training efficiency: cache built feature vectors, bigger batch size

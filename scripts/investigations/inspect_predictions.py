@@ -8,6 +8,10 @@ import numpy as np
 import pandas as pd
 import torch
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import RESULTS_DIR, axis_limits, load_scene, plot_scene, scene_image_path
 from histogram_features import FEATURES, N_BINS
 from train_mlp import CLASSES

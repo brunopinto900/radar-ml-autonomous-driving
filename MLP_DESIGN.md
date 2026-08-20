@@ -63,7 +63,7 @@ found in `FEATURE_MAP.md`, deliberately deferred to `TODO.md` v1.1 until the pap
 baseline works.
 
 **Bins**: `K = 16` per feature, uniform across all five (`DESIGN_DECISIONS.md` decision 3,
-from a population-level sweep in `scripts/bin_sweep.py`). Bin edges are global (dataset-wide,
+from a population-level sweep in `scripts/investigations/bin_sweep.py`). Bin edges are global (dataset-wide,
 computed from the **train split only** - no val/test leakage), percentile-based (0.5-99.5%)
 except `vr_rel`-style explicit overrides where needed (not used in this raw-feature v1 set).
 
@@ -111,7 +111,7 @@ framing entirely:
 ## Data pipeline (not yet built)
 
 Nothing computes the real per-instance feature vectors yet - everything so far
-(`scripts/instance_histograms.py`, `scripts/bin_sweep.py`) is diagnostic (small example
+(`scripts/investigations/instance_histograms.py`, `scripts/investigations/bin_sweep.py`) is diagnostic (small example
 samples or pooled population plots), not a function that maps an instance's points to its
 80-dim vector for the full ~354k train instances. Needed:
 

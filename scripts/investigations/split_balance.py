@@ -10,6 +10,10 @@ import pandas as pd
 matplotlib.use("Agg")  # headless: this script only ever saves plots, never shows them
 import matplotlib.pyplot as plt  # noqa: E402
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import RESULTS_DIR  # noqa: E402
 
 SPLIT_COLORS = {"train": "tab:blue", "val": "tab:orange", "test": "tab:green"}

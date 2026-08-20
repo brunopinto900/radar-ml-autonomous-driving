@@ -12,6 +12,10 @@ import numpy as np
 import pandas as pd
 import torch
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import RESULTS_DIR
 from histogram_features import GROUP_KEY
 from train_mlp import CLASSES, load_or_build_dataset

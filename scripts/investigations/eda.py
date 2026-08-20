@@ -11,6 +11,10 @@ import pandas as pd
 matplotlib.use("Agg")  # headless: this script only ever saves plots, never shows them
 import matplotlib.pyplot as plt  # noqa: E402
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import GROUP_COLORS, RESULTS_DIR  # noqa: E402
 
 EDA_DIR = RESULTS_DIR / "eda"

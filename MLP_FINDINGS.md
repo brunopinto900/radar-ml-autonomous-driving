@@ -1,7 +1,7 @@
 # MLP Findings (Day 6)
 
 Results from actually running the design in `MLP_DESIGN.md` on the full data
-(`scripts/train_mlp_full.py`, `scripts/class_confusion_diagnostics.py`), not the smoke test
+(`scripts/train_mlp_full.py`, `scripts/investigations/class_confusion_diagnostics.py`), not the smoke test
 (`scripts/train_mlp.py`). Findings only - design rationale lives in `MLP_DESIGN.md`,
 dataset/encoding rationale in `DESIGN_DECISIONS.md`.
 
@@ -125,7 +125,7 @@ diagonal all show a real, substantial gap between correctly-classified and car-c
 
 This was invisible in the initial overlaid-scatter version of these plots (overplotting hid
 it) and only became visible once scatter was replaced with violin plots + a numeric summary
-table (`scripts/class_confusion_diagnostics.py`) - a scatter with heavy overlap shows *where
+table (`scripts/investigations/class_confusion_diagnostics.py`) - a scatter with heavy overlap shows *where
 any point exists*, not *where most points are*, and can hide a real difference in central
 tendency.
 
@@ -219,7 +219,7 @@ canonical model's 4.2% (pair-restricted, section 4).
 3. *Structural feature overlap - the filter keeps only `car`'s atypical, `large_vehicle`-sized
    tail (only 22.2% of `car` has ≥4 points vs. `large_vehicle`'s 66.4% self-retention)?*
    Plausible from the point-count/extent proxies, but checked directly on the raw 80-dim feature
-   vectors (`scripts/car_large_vehicle_feature_overlap.py`) and it **doesn't hold**: a logistic
+   vectors (`scripts/investigations/car_large_vehicle_feature_overlap.py`) and it **doesn't hold**: a logistic
    regression still separates the dense-`car` tail from `large_vehicle` at 98.5% held-out AUC,
    barely down from full-`car`'s 99.2%. The signal to tell them apart is still there.
 
@@ -227,7 +227,7 @@ canonical model's 4.2% (pair-restricted, section 4).
 constant across every ablation, but steps/epoch = dataset_size / batch_size, so the same "20
 epochs" meant ~27,700 total gradient steps for the full 354,277-instance set and only ~7,100 for
 the 91,269-instance filtered set. Per-class accuracy over those 20 epochs
-(`scripts/min4pts_per_class_accuracy.py`) shows `car` peaking at epoch 6 (60.8%) then collapsing
+(`scripts/investigations/min4pts_per_class_accuracy.py`) shows `car` peaking at epoch 6 (60.8%) then collapsing
 continuously to 3.2% by epoch 20 - the mirror image of `large_vehicle`'s smooth monotonic climb
 (2.0% -> 95.2%, never plateauing). Not a low-representation-class effect (`car` is the *largest*
 class in the filtered set, 39.1%) - every extra gradient step keeps buying `large_vehicle`
@@ -257,7 +257,7 @@ min_train_points_epoch_matched}/`, `results/mlp_full_run/{sparse,dense}_subset_d
 ## 7. Feature correlation analysis (pre-work for adding an explicit point-count feature)
 
 Before adding `n_points` as an explicit 81st input dimension, checked two things directly
-(`scripts/feature_correlation_analysis.py`, train set, `results/mlp_full_run/feature_correlation/`):
+(`scripts/investigations/feature_correlation_analysis.py`, train set, `results/mlp_full_run/feature_correlation/`):
 how redundant it already is with the existing 80 dims, and which features/classes actually have
 a real relationship worth exploiting.
 
@@ -432,7 +432,7 @@ confusion (`large_vehicle`->`car`, ~92% of all `large_vehicle` errors), driven b
 small-footprint `large_vehicle` instances. But `large_vehicle` is itself a merge of 4 raw
 RadarScenes labels (`DESIGN_DECISIONS.md` decision 1: `large_vehicle` (raw), `truck`, `bus`,
 `train`), never broken back down until now. `train_points.parquet` keeps the pre-merge label
-in `label_name`, so `scripts/large_vehicle_subtype_analysis.py` groups by it directly instead
+in `label_name`, so `scripts/investigations/large_vehicle_subtype_analysis.py` groups by it directly instead
 of by the merged `class_name`.
 
 **Composition:** truck and bus dominate - 71% and 26% of `large_vehicle` instances
@@ -463,7 +463,7 @@ car would throw away a distinction that's still physically recoverable, to fix a
 bus barely contributes to. If a class-grouping change is pursued (see Next steps), the data
 supports treating truck differently from bus, not merging all of `large_vehicle` uniformly.
 
-**Per-feature histograms (`scripts/large_vehicle_subtype_histograms.py`) turned up a real
+**Per-feature histograms (`scripts/investigations/large_vehicle_subtype_histograms.py`) turned up a real
 conflict between two features** on which class (truck or bus) is actually the "outlier" vs.
 car - resolved by median rather than mean (these distributions are right-skewed), then settled
 properly by a joint-feature separability probe rather than trusting either single stat:
@@ -479,7 +479,7 @@ plausible: a bus's flat panel sides can throw energy away from the radar at typi
 angles (weaker return despite being larger), while a truck reflects more consistently despite
 being smaller. Single-feature comparison can't adjudicate between two features that disagree.
 
-**Separability probe (`scripts/truck_bus_car_separability.py`)** - same method as the section 6
+**Separability probe (`scripts/investigations/truck_bus_car_separability.py`)** - same method as the section 6
 `car_large_vehicle_feature_overlap.py` check (logistic regression on the full 80-dim feature
 vector, not one stat at a time), run for car-vs-truck and car-vs-bus, both overall and
 sparse-restricted:
@@ -517,7 +517,7 @@ while bus stays the most separable from everything (0.897-0.969).
 `bus` alone** - not a `{car,truck}` / `{bus,large_vehicle}` split. Bus isn't closer to
 `large_vehicle`(raw) than to car; it is uniformly the odd one out against all three.
 
-**Result: retrained with the revised grouping** (`scripts/train_mlp_regroup.py` - `car` =
+**Result: retrained with the revised grouping** (`scripts/investigations/train_mlp_regroup.py` - `car` =
 old car+truck+large_vehicle(raw), `large_vehicle` = old bus+train only; everything else
 identical to the canonical baseline, X reused unchanged from the cached baseline features
 since regrouping only changes labels, not which points belong to which instance). First pass
@@ -573,8 +573,8 @@ train instances) staying genuinely thin to learn a bus's full shape from is a se
 concern - different mechanism than loss weighting, and not something reweighting can fix.
 
 **Dug into why the gain landed on `car`/`pedestrian_group` instead of `large_vehicle`, two ways
-(`scripts/regroup_large_vehicle_confusion_diagnostics.py`,
-`scripts/regroup_per_class_accuracy.py`), both against the converged 1000-epoch checkpoint.**
+(`scripts/investigations/regroup_large_vehicle_confusion_diagnostics.py`,
+`scripts/investigations/regroup_per_class_accuracy.py`), both against the converged 1000-epoch checkpoint.**
 
 *1. Correct vs. misclassified-as-car `large_vehicle` (bus) instances, same method as section 4's
 original deep dive:*
@@ -624,19 +624,19 @@ rather than just a correlational one. Cheap way to check if pursued later: compa
 density-normalized (count/n_points) histograms for correct vs. wrong-as-car buses instead of
 raw counts - no retraining needed, same kind of stat check as the rest of section 10.
 
-Files (this result): `scripts/train_mlp_regroup.py`
+Files (this result): `scripts/investigations/train_mlp_regroup.py`
 (`results/mlp_full_run/car_large_vehicle_regroup/`,
 `results/mlp_full_run/car_large_vehicle_regroup_1000epoch/`),
-`scripts/regroup_large_vehicle_confusion_diagnostics.py`,
-`scripts/regroup_per_class_accuracy.py`
+`scripts/investigations/regroup_large_vehicle_confusion_diagnostics.py`,
+`scripts/investigations/regroup_per_class_accuracy.py`
 (`results/mlp_full_run/car_large_vehicle_regroup_1000epoch/per_class_accuracy.png`).
 
-Files (section 10 overall): `scripts/large_vehicle_subtype_analysis.py`,
-`scripts/large_vehicle_subtype_histograms.py`
+Files (section 10 overall): `scripts/investigations/large_vehicle_subtype_analysis.py`,
+`scripts/investigations/large_vehicle_subtype_histograms.py`
 (`results/mlp_full_run/large_vehicle_car_confusion/subtype_histograms.png` +
-`subtype_histograms_stats.csv`), `scripts/truck_bus_car_separability.py`
-(`results/mlp_full_run/truck_bus_separability/results.txt`), `scripts/train_mlp_regroup.py`,
-`scripts/regroup_large_vehicle_confusion_diagnostics.py`, `scripts/regroup_per_class_accuracy.py`.
+`subtype_histograms_stats.csv`), `scripts/investigations/truck_bus_car_separability.py`
+(`results/mlp_full_run/truck_bus_separability/results.txt`), `scripts/investigations/train_mlp_regroup.py`,
+`scripts/investigations/regroup_large_vehicle_confusion_diagnostics.py`, `scripts/investigations/regroup_per_class_accuracy.py`.
 
 ## 11. Conclusion: single-frame point-cloud sparsity is the project's binding constraint
 
@@ -684,7 +684,7 @@ untested, information-adding lever).
 Tests section 10's open hypothesis directly: histogram blocks normalized to each bin's *share*
 of the instance's own points (density) instead of raw counts, with `n_points` kept as an
 explicit 81st feature so magnitude isn't discarded, just decoupled from shape
-(`histogram_features.py`'s `normalize_density` flag, `scripts/train_mlp_density_regroup.py`,
+(`histogram_features.py`'s `normalize_density` flag, `scripts/investigations/train_mlp_density_regroup.py`,
 combined with section 10's car=car+truck+large_vehicle(raw)/large_vehicle=bus-only grouping).
 
 **Result, converged (1000 epochs, same plateau check as elsewhere in this doc):**
@@ -707,10 +707,10 @@ balanced accuracy at 78.8% - both dropped substantially by convergence, see belo
 `large_vehicle` recall: 76.6% at 50 epochs -> 60.4% at 1000 epochs (-16.2pp). Balanced accuracy
 was actually *higher* at 50 epochs (78.8%) than at convergence (76.6%) - the second time in
 this investigation an early checkpoint has overstated a `large_vehicle` win that partly
-reverses with more training (`scripts/regroup_per_class_accuracy.py` showed the same direction
+reverses with more training (`scripts/investigations/regroup_per_class_accuracy.py` showed the same direction
 for the raw-count regroup, just smaller: 0.601 peak -> 0.549 converged).
 
-**Per-epoch failure-profile diagnostic** (`scripts/regroup_epoch_failure_profile.py`) - tracked,
+**Per-epoch failure-profile diagnostic** (`scripts/investigations/regroup_epoch_failure_profile.py`) - tracked,
 at every epoch, the feature profile of true `large_vehicle` instances misclassified as `car`,
 not just the aggregate accuracy curve:
 
@@ -747,10 +747,10 @@ pattern, consistent with everything observed - **not directly measured** (would 
 gradient variance tracked over epochs, not done here), flagged as a hypothesis, not a
 confirmed result.
 
-Files: `scripts/train_mlp_density_regroup.py`
+Files: `scripts/investigations/train_mlp_density_regroup.py`
 (`results/mlp_full_run/density_norm_regroup_50epoch/`,
 `results/mlp_full_run/density_norm_regroup_1000epoch/`),
-`scripts/regroup_epoch_failure_profile.py`
+`scripts/investigations/regroup_epoch_failure_profile.py`
 (`results/mlp_full_run/density_norm_regroup_50epoch/epoch_failure_profile.csv` + `.png`).
 
 ## Next steps (not yet decided, not ranked)

@@ -21,8 +21,13 @@ sequence, each with `radar_data.h5`, `scenes.json`, and a `camera/` folder).
 ## Layout
 
 ```
-scripts/     source (dataloader.py, build_points_table.py, class_imbalance.py,
-             split_balance.py, make_split.py, check_gpu.py)
+scripts/                core pipeline (dataloader.py, build_points_table.py,
+                         make_split.py, histogram_features.py, train_mlp.py,
+                         train_mlp_full.py, check_gpu.py)
+scripts/investigations/ one-off diagnostics and ablations run during the project
+                         (class balance checks, confusion-matrix diagnostics,
+                         feature/taxonomy ablations - see MLP_FINDINGS.md for
+                         which script backs which finding)
 results/     generated tables/plots (gitignored, recreated by running the scripts)
 data/        the RadarScenes dataset (gitignored)
 visualize.sh   rad_viewer launcher (kept in root - it's an entry point, not a library)
@@ -33,11 +38,11 @@ visualize.sh   rad_viewer launcher (kept in root - it's an entry point, not a li
 Run in this order (each reads a previous step's output from `results/`):
 
 ```bash
-python3 scripts/make_split.py          # -> results/sequence_splits.csv
-python3 scripts/build_points_table.py  # -> results/{train,val,test}_points.parquet
-python3 scripts/class_imbalance.py     # -> results/class_counts.png
-python3 scripts/split_balance.py       # -> results/split_balance.png
-python3 scripts/dataloader.py          # -> results/scene_plot.png, object_attributes.png
+python3 scripts/make_split.py                          # -> results/sequence_splits.csv
+python3 scripts/build_points_table.py                  # -> results/{train,val,test}_points.parquet
+python3 scripts/investigations/class_imbalance.py      # -> results/class_counts.png
+python3 scripts/investigations/split_balance.py        # -> results/split_balance.png
+python3 scripts/dataloader.py                          # -> results/scene_plot.png, object_attributes.png
 ```
 
 - **`make_split.py`** — sequence-level train/val/test split (never scene/instance-level,

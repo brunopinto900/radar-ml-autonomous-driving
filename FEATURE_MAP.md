@@ -2,7 +2,7 @@
 
 Separate from `EDA.md`'s numbered plan/findings structure - these are 2D scatter plots
 looking at joint feature relationships (not single-feature distributions), generated from
-`scripts/eda.py`'s `eda_2_rcs_vs_point_count_scatter*` functions. Uses
+`scripts/investigations/eda.py`'s `eda_2_rcs_vs_point_count_scatter*` functions. Uses
 `results/train_points.parquet` only, same split discipline as `EDA.md`.
 
 ## 02c — mean RCS vs. point count, by final class
@@ -232,7 +232,7 @@ cutoff required).
 reason `eda_vr_dispersion_robust`/`01d` is commented out - it's slow and not needed again
 until it's time to actually pick the Day 5 feature set.
 
-## Per-instance feature histograms (Day 5 - `scripts/instance_histograms.py`)
+## Per-instance feature histograms (Day 5 - `scripts/investigations/instance_histograms.py`)
 
 Everything above this section works on hand-picked scalar statistics (`mean_rcs`, `vr_std`,
 `extent`, ...). Day 5's actual task is the histogram-encoding scheme itself - the same idea

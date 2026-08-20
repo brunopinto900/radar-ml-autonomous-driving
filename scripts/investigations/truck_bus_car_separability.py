@@ -19,6 +19,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # scripts/ core modules
+
 from dataloader import RESULTS_DIR
 from histogram_features import (FEATURES, GROUP_KEY, N_BINS, add_relative_xy, fit_bin_edges,
                                  instance_vector)
