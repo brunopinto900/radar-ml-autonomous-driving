@@ -26,6 +26,19 @@ LABELS = {
     11: ("static", "tab:gray"),
 }
 
+# sensor_id -> (name, x, y, yaw) mounting position in car coordinates, per RadarScenes'
+# sensors.json (4 radars on the front bumper, all facing forward-ish at different angles)
+SENSORS = {
+    1: ("right", 3.663, -0.873, -1.48418552),
+    2: ("front right", 3.86, -0.70, -0.436185662),
+    3: ("front left", 3.86, 0.70, 0.436),
+    4: ("left", 3.663, 0.873, 1.484),
+}
+
+
+def sensor_label(sensor_id: int) -> str:
+    return f"sensor {sensor_id} ({SENSORS[sensor_id][0]})"
+
 
 def load_scene(sequence_name: str, timestamp: int | None = None) -> np.ndarray:
     """Load radar detections for one scene (one radar measurement) of a sequence.
@@ -97,9 +110,12 @@ def largest_object(detections: np.ndarray) -> bytes | None:
 
 
 def axis_limits(detections: np.ndarray, pad: float = 2.0) -> tuple[tuple[float, float], tuple[float, float]]:
-    """(xlim, ylim) covering a scene's full extent, for sharing across plots."""
-    xlim = (detections["y_cc"].min() - pad, detections["y_cc"].max() + pad)
-    ylim = (detections["x_cc"].min() - pad, detections["x_cc"].max() + pad)
+    """(xlim, ylim) covering a scene's full extent plus its sensor(s), for sharing across plots."""
+    sensor_x, sensor_y = zip(*(SENSORS[int(sid)][1:3] for sid in np.unique(detections["sensor_id"])))
+    y_min, y_max = min(detections["y_cc"].min(), *sensor_y), max(detections["y_cc"].max(), *sensor_y)
+    x_min, x_max = min(detections["x_cc"].min(), *sensor_x), max(detections["x_cc"].max(), *sensor_x)
+    xlim = (y_min - pad, y_max + pad)
+    ylim = (x_min - pad, x_max + pad)
     return xlim, ylim
 
 
@@ -152,7 +168,9 @@ def plot_scene(
                 label="tracked object" if i == 0 else None,
             ))
 
-    ax.scatter(0, 0, c="black", marker="^", s=100, label="sensor")
+    for sid in np.unique(detections["sensor_id"]):
+        _, sx, sy, _ = SENSORS[int(sid)]
+        ax.scatter(sy, sx, c="black", marker="^", s=100, label=sensor_label(int(sid)))
     ax.set_xlabel("y_cc [m] (left)")
     ax.set_ylabel("x_cc [m] (forward)")
     ax.set_title(title)
@@ -215,10 +233,12 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
     scene_plot_path = RESULTS_DIR / "scene_plot.png"
     object_attrs_path = RESULTS_DIR / "object_attributes.png"
 
+    scene_sensor = sensor_label(int(detections["sensor_id"][0]))
+
     xlim, ylim = axis_limits(detections)
     plot_scene(
         detections,
-        title=f"{sequence_name} - one radar scan",
+        title=f"{sequence_name} - one radar scan - {scene_sensor}",
         path=scene_plot_path,
         image_path=scene_image_path(sequence_name, timestamp),
         xlim=xlim,
@@ -240,7 +260,7 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
 
     plot_object_attributes(
         obj,
-        title=f"{label_name} ({track_id.decode()[:8]}) - {len(obj)} points",
+        title=f"{label_name} ({track_id.decode()[:8]}) - {len(obj)} points - {scene_sensor}",
         path=object_attrs_path,
         xlim=xlim,
         ylim=ylim,
@@ -251,4 +271,4 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
 
 
 if __name__ == "__main__":
-    inspect_scene("sequence_1", 156947099838)
+    inspect_scene("sequence_2", 158241306085)
