@@ -18,9 +18,10 @@ sequence, each with `radar_data.h5`, `scenes.json`, and a `camera/` folder).
 ## Layout
 
 ```
-scripts/    
-results/     generated plots (gitignored, recreated by running the scripts)
-data/        the RadarScenes dataset (gitignored)
+scripts/       data loading, table building, plotting
+notebooks/     EDA notebooks
+results/       generated plots + points_table.parquet (gitignored, recreated by running the scripts)
+data/          the RadarScenes dataset (gitignored)
 visualize.sh   rad_viewer launcher
 ```
 
@@ -36,13 +37,42 @@ Data layer:
 - `load_scene(sequence_name, timestamp=None)` — one scene's detections as a structured array.
 - `object_instance(detections, track_id)` — one tracked object's `{track_id, label_id, label_name, points}`. This is the `{points, attributes, label}` unit used for training data.
 - `list_track_ids(detections)` / `largest_object(detections)` — enumerate or auto-pick objects in a scene.
+- `SENSORS` — sensor_id → (name, x, y, yaw) mounting position in car coordinates (4 radars on the front bumper); `sensor_label(sensor_id)` formats it as e.g. `"sensor 2 (front right)"`. `axis_limits()` and the plot titles use this so a sensor's real mounting point is always in frame, not fixed at the car origin.
 
 Visualization:
 - `inspect_scene(sequence_name, timestamp, track_id=None)` — the main entry point. Loads a scene, plots it next to the closest camera frame (`results/scene_plot.png`), auto-picks (or uses a given) tracked object, prints its attribute table, and plots that object colored by RCS and by Doppler (`results/object_attributes.png`).
 
 ```bash
-python3 scripts/dataloader.py   # runs inspect_scene("sequence_1", <a busy timestamp>)
+python3 scripts/dataloader.py   # runs inspect_scene("sequence_2", <a busy sensor-2 timestamp>)
 ```
+
+## `scripts/build_points_table.py`
+
+Builds the `{points, attributes, label}` dataset as a long-format table: one row per radar
+point belonging to a tracked (dynamic) object, restricted to sensor #2 (front right) and a
+5-sequence subset (`sequence_1`-`sequence_5`) for a first pass. Instance identity
+(`sequence_name`, `timestamp`, `track_id`) is repeated on every point's row — group by those
+three columns to recover one object instance's point set.
+
+```bash
+python3 scripts/build_points_table.py   # writes results/points_table.parquet
+```
+
+## `scripts/class_imbalance.py`
+
+`plot_class_imbalance(table_path=None)` loads the points table, counts labeled object
+instances per class (one count per instance, not per point), and plots/saves a log-scale bar
+chart colored by class (`results/class_counts.png`). Returns `(counts, fig)`.
+
+```bash
+python3 scripts/class_imbalance.py
+```
+
+## `notebooks/`
+
+`data_analysis.ipynb` is self-contained: it builds the points table with
+`build_and_save_points_table()`, then calls `plot_class_imbalance()` on it, and leaves room
+for written EDA notes.
 
 ## `visualize.sh`
 

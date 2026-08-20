@@ -30,13 +30,22 @@ def build_points_table(sequence_names: list[str]) -> pd.DataFrame:
     return pd.concat([sequence_points(name) for name in sequence_names], ignore_index=True)
 
 
-if __name__ == "__main__":
-    sequence_names = [f"sequence_{i}" for i in range(1, 6)]  # small subset for a first pass
+def build_and_save_points_table(sequence_names: list[str] | None = None, table_path=None) -> pd.DataFrame:
+    """Build the points table and save it as a parquet file. Returns the table."""
+    if sequence_names is None:
+        sequence_names = [f"sequence_{i}" for i in range(1, 6)]  # small subset for a first pass
+    if table_path is None:
+        table_path = RESULTS_DIR / "points_table.parquet"
+
     df = build_points_table(sequence_names)
     n_instances = df.groupby(["sequence_name", "timestamp", "track_id"]).ngroups
     print(f"{len(df)} points across {n_instances} object instances, {len(sequence_names)} sequences")
 
     RESULTS_DIR.mkdir(exist_ok=True)
-    table_path = RESULTS_DIR / "points_table.parquet"
     df.to_parquet(table_path, index=False)
     print(f"Saved points table to {table_path}")
+    return df
+
+
+if __name__ == "__main__":
+    build_and_save_points_table()
