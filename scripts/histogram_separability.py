@@ -8,10 +8,13 @@ count is a hyperparameter of the encoding, scored the same way any other one is.
 import numpy as np
 import pandas as pd
 
+from dataloader import RESULTS_DIR
 from feature_distributions import FINAL_CLASSES, POINT_LEVEL_FEATURES, apply_class_groups
-from taxonomy_separability import add_relative_features, run_probe
+from separability_probe import run_probe
+from taxonomy_separability import add_relative_features
 
 INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
+SWEEP_CACHE = RESULTS_DIR / "bin_sweep_results.parquet"
 
 
 def build_histogram_features(
@@ -55,9 +58,19 @@ def run_bin_sweep(
     random_state: int = 0,
 ) -> pd.DataFrame:
     """Builds histogram-encoded features at each candidate bin count and runs both models
-    (see taxonomy_separability.run_probe) at each, scoring by macro-average per-class
-    one-vs-rest ROC-AUC - the number that should decide the bin count. Prints and returns one
-    row per (bin_count, model)."""
+    (see separability_probe.run_probe) at each, scoring by macro-average per-class one-vs-rest
+    ROC-AUC - the number that should decide the bin count. Cached to results/bin_sweep_results.parquet
+    keyed by the exact bin_counts requested (each RF fit here takes minutes); skips the sweep
+    entirely if the cache already covers the same bin_counts. Prints and returns one row per
+    (bin_count, model)."""
+    if SWEEP_CACHE.exists():
+        cached = pd.read_parquet(SWEEP_CACHE)
+        if set(cached["n_bins"].unique()) == set(bin_counts):
+            print(f"{SWEEP_CACHE} already covers bin_counts={bin_counts}, skipping sweep")
+            print(cached.round(3).to_string(index=False))
+            return cached
+        print(f"{SWEEP_CACHE} covers different bin_counts than requested, rebuilding")
+
     rows = []
     for n_bins in bin_counts:
         features = build_histogram_features(df, n_bins, classes)
@@ -77,6 +90,9 @@ def run_bin_sweep(
         print(f"n_bins={n_bins} done ({len(feature_cols)} features)")
 
     summary = pd.DataFrame(rows)
+    RESULTS_DIR.mkdir(exist_ok=True)
+    summary.to_parquet(SWEEP_CACHE)
+    print(f"Saved {SWEEP_CACHE}")
     print(summary.round(3).to_string(index=False))
     return summary
 
