@@ -14,7 +14,8 @@ NAME_TO_COLOR = {name: color for name, color in LABELS.values()}
 
 
 INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
-DOPPLER_SPREAD_CACHE = RESULTS_DIR / "doppler_spread_cache.parquet"
+TAXONOMY_DIR = RESULTS_DIR / "taxonomy"
+DOPPLER_SPREAD_CACHE = RESULTS_DIR / "data" / "doppler_spread_cache.parquet"
 
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,7 +38,7 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
 
     df["doppler_spread"] = group["vr_compensated"].transform(lambda vr: (vr - vr.median()).abs().median())
 
-    RESULTS_DIR.mkdir(exist_ok=True)
+    DOPPLER_SPREAD_CACHE.parent.mkdir(parents=True, exist_ok=True)
     df.drop_duplicates(INSTANCE_COLS)[INSTANCE_COLS + ["doppler_spread"]].to_parquet(DOPPLER_SPREAD_CACHE)
     print(f"Saved doppler_spread cache to {DOPPLER_SPREAD_CACHE}")
     return df
@@ -101,7 +102,9 @@ def run_separability_probe(
     X = features[PROBE_FEATURES].to_numpy(dtype="float64")
     y = features["label_name"].to_numpy(dtype=str)
     groups = features["sequence_name"].to_numpy(dtype=str)
-    return run_probe(X, y, groups, classes, n_splits=n_splits, random_state=random_state, tag="taxonomy")
+    return run_probe(
+        X, y, groups, classes, n_splits=n_splits, random_state=random_state, tag="taxonomy", results_dir=TAXONOMY_DIR
+    )
 
 
 def plot_taxonomy_class_balance(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES):
@@ -146,8 +149,8 @@ def plot_taxonomy_class_balance(df: pd.DataFrame, classes: list[str] = TAXONOMY_
     fig.suptitle("large_vehicle / truck / bus - train+val scope")
     fig.tight_layout()
 
-    RESULTS_DIR.mkdir(exist_ok=True)
-    path = RESULTS_DIR / "taxonomy_class_balance.png"
+    TAXONOMY_DIR.mkdir(parents=True, exist_ok=True)
+    path = TAXONOMY_DIR / "taxonomy_class_balance.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 
@@ -195,8 +198,8 @@ def plot_cv_fold_class_counts(
     ax.tick_params(axis="x", rotation=0)
     fig.tight_layout()
 
-    RESULTS_DIR.mkdir(exist_ok=True)
-    path = RESULTS_DIR / "taxonomy_cv_fold_counts.png"
+    TAXONOMY_DIR.mkdir(parents=True, exist_ok=True)
+    path = TAXONOMY_DIR / "taxonomy_cv_fold_counts.png"
     fig.savefig(path, dpi=150)
     print(f"Saved {path}")
 

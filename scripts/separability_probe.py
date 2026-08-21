@@ -58,6 +58,7 @@ def run_probe(
     verbose: bool = True,
     save_confusion: bool = True,
     tag: str = "probe",
+    results_dir=RESULTS_DIR,
 ) -> dict:
     """Sequence-grouped split (StratifiedGroupKFold on `groups`, e.g. sequence_name, ~1/n_splits
     held out - instances from the same sequence share background/weather/vehicle, so an
@@ -66,9 +67,11 @@ def run_probe(
     per-class one-vs-rest ROC-AUC. `verbose` gates the classification_report / pairwise-AUC
     prints - off for sweeps over many configurations where per-run detail is just noise.
     `save_confusion` gates the row-normalized confusion matrix plot, saved to
-    results/{tag}_confusion_matrix_<model>.png. High AUC does not imply good precision/recall -
-    AUC is threshold-independent, but class weighting shifts the actual argmax decision boundary,
-    so `metrics_per_class` (precision/recall/f1/support at that operating point, from
+    {results_dir}/{tag}_confusion_matrix_<model>.png (results_dir defaults to the results/ root,
+    callers with their own subfolder - e.g. results/taxonomy/ - should pass it explicitly). High
+    AUC does not imply good precision/recall - AUC is threshold-independent, but class weighting
+    shifts the actual argmax decision boundary, so `metrics_per_class` (precision/recall/f1/
+    support at that operating point, from
     precision_recall_fscore_support) is returned alongside auc_per_class rather than assuming
     one implies the other. Returns {model_name: (report, auc_per_class, metrics_per_class,
     fig_or_None)}."""
@@ -140,8 +143,8 @@ def run_probe(
             ax.set_title(f"{tag} - {name}\n(sequence-grouped held-out, row-normalized)")
             fig.tight_layout()
 
-            RESULTS_DIR.mkdir(exist_ok=True)
-            path = RESULTS_DIR / f"{tag}_confusion_matrix_{name}.png"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            path = results_dir / f"{tag}_confusion_matrix_{name}.png"
             fig.savefig(path, dpi=150)
             if verbose:
                 print(f"Saved {path}")

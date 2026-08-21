@@ -44,7 +44,7 @@ def build_and_save_points_table(sequence_names: list[str] | None = None, table_p
     if sequence_names is None:
         sequence_names = ALL_SEQUENCES
     if table_path is None:
-        table_path = RESULTS_DIR / "points_table.parquet"
+        table_path = RESULTS_DIR / "data" / "points_table.parquet"
 
     if table_path.exists():
         cached_sequences = set(pd.read_parquet(table_path, columns=["sequence_name"])["sequence_name"])
@@ -57,7 +57,7 @@ def build_and_save_points_table(sequence_names: list[str] | None = None, table_p
     n_instances = df.groupby(["sequence_name", "timestamp", "track_id"]).ngroups
     print(f"{len(df)} points across {n_instances} object instances, {len(sequence_names)} sequences")
 
-    RESULTS_DIR.mkdir(exist_ok=True)
+    table_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(table_path, index=False)
     print(f"Saved points table to {table_path}")
     return df

@@ -81,9 +81,10 @@ def plot_bin_sweep(
         fig.tight_layout()
         figs[feature] = fig
 
-    RESULTS_DIR.mkdir(exist_ok=True)
+    feature_dist_dir = RESULTS_DIR / "feature_distributions"
+    feature_dist_dir.mkdir(parents=True, exist_ok=True)
     for feature, fig in figs.items():
-        path = RESULTS_DIR / f"bin_sweep_{feature}.png"
+        path = feature_dist_dir / f"bin_sweep_{feature}.png"
         fig.savefig(path, dpi=150)
         print(f"Saved {path}")
 

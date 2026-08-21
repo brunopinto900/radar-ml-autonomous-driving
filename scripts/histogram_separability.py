@@ -16,25 +16,42 @@ from separability_probe import run_probe_cv
 from taxonomy_separability import add_relative_features
 
 INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
-SWEEP_CACHE = RESULTS_DIR / "bin_sweep_results.parquet"
+HISTOGRAM_SEPARABILITY_DIR = RESULTS_DIR / "histogram_separability"
+SWEEP_CACHE = HISTOGRAM_SEPARABILITY_DIR / "bin_sweep_results.parquet"
+
+
+def fit_bin_edges(
+    df: pd.DataFrame, n_bins: int, features: list[str] = POINT_LEVEL_FEATURES
+) -> dict[str, np.ndarray]:
+    """Percentile-based bin edges ([1st, 99th] percentile, decision 2), fit from `df` alone. Pass
+    a train-only df and reuse the returned edges for val/test via build_histogram_features's
+    `edges` param - bin boundaries are a fitted preprocessing parameter, so refitting them per
+    split would leak val/test's distribution into where the bins fall."""
+    return {feature: np.linspace(df[feature].quantile(0.01), df[feature].quantile(0.99), n_bins + 1) for feature in features}
 
 
 def build_histogram_features(
-    df: pd.DataFrame, n_bins: int, classes: list[str] = FINAL_CLASSES, features: list[str] = POINT_LEVEL_FEATURES
+    df: pd.DataFrame,
+    n_bins: int,
+    classes: list[str] = FINAL_CLASSES,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    edges: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """One row per instance: each point-level feature becomes n_bins columns holding the
     fraction of that instance's own points landing in each bin - fraction, not raw count, so a
-    busy instance's histogram encodes distribution shape rather than just point count. Bin
-    edges are fixed at the pooled [1st, 99th] percentile for that feature (matches the bin-sweep
-    plots' range fix), same edges across every n_bins so only resolution changes in the sweep.
-    doppler_spread is appended unbinned, since it's already one value per instance."""
+    busy instance's histogram encodes distribution shape rather than just point count. `edges`
+    (see fit_bin_edges), if given, are used as-is instead of being recomputed from `df` - needed
+    to encode val/test with edges fit on train only. Otherwise edges are fit from `df` itself
+    (fine when df is the only/whole pool being encoded, e.g. the CV probes). doppler_spread is
+    appended unbinned, since it's already one value per instance."""
     df = df.loc[df["group"].isin(classes)]
+    if edges is None:
+        edges = fit_bin_edges(df, n_bins, features)
 
     hist_frames = []
     for feature in features:
-        lo, hi = df[feature].quantile(0.01), df[feature].quantile(0.99)
-        edges = np.linspace(lo, hi, n_bins + 1)
-        bin_idx = np.clip(np.digitize(df[feature], edges[1:-1]), 0, n_bins - 1)
+        e = edges[feature]
+        bin_idx = np.clip(np.digitize(df[feature], e[1:-1]), 0, n_bins - 1)
         counts = (
             df.assign(_bin=bin_idx)
             .groupby(INSTANCE_COLS + ["_bin"])
@@ -105,7 +122,7 @@ def run_bin_sweep(
         print(f"n_bins={n_bins} done")
 
     summary = pd.DataFrame(rows)
-    RESULTS_DIR.mkdir(exist_ok=True)
+    SWEEP_CACHE.parent.mkdir(parents=True, exist_ok=True)
     summary.to_parquet(SWEEP_CACHE)
     print(f"Saved {SWEEP_CACHE}")
     macro_cols = ["n_bins", "model", "macro_auc_mean", "macro_precision_mean", "macro_recall_mean", "macro_f1_mean"]

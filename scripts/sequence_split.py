@@ -16,7 +16,7 @@ from dataloader import RESULTS_DIR
 from feature_distributions import FINAL_CLASSES
 
 INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
-SPLIT_CACHE = RESULTS_DIR / "sequence_split.json"
+SPLIT_CACHE = RESULTS_DIR / "data" / "sequence_split.json"
 
 
 def load_split() -> dict[str, list[str]]:
@@ -81,7 +81,7 @@ def split_sequences(
         "val": sorted(val_sequences),
         "test": sorted(test_sequences),
     }
-    RESULTS_DIR.mkdir(exist_ok=True)
+    SPLIT_CACHE.parent.mkdir(parents=True, exist_ok=True)
     SPLIT_CACHE.write_text(json.dumps({"key": cache_key, "splits": splits}, indent=2))
     print(f"Saved {SPLIT_CACHE}")
     _print_summary(df, splits, classes)

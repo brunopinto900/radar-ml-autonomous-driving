@@ -257,9 +257,10 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
     detections = load_scene(sequence_name, timestamp)
     print(f"Loaded {len(detections)} detections from {sequence_name} @ {timestamp}")
 
-    RESULTS_DIR.mkdir(exist_ok=True)
-    scene_plot_path = RESULTS_DIR / "scene_plot.png"
-    object_attrs_path = RESULTS_DIR / "object_attributes.png"
+    scenes_dir = RESULTS_DIR / "scenes"
+    scenes_dir.mkdir(parents=True, exist_ok=True)
+    scene_plot_path = scenes_dir / "scene_plot.png"
+    object_attrs_path = scenes_dir / "object_attributes.png"
 
     scene_sensor = sensor_label(int(detections["sensor_id"][0]))
 

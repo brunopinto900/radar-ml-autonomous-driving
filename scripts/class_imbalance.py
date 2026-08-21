@@ -13,7 +13,7 @@ def plot_class_imbalance(table_path=None):
     """Load the points table, count object instances per class, and plot/save a
     log-scale bar chart. Returns (summary, fig), where summary is a count/pct DataFrame."""
     if table_path is None:
-        table_path = RESULTS_DIR / "points_table.parquet"
+        table_path = RESULTS_DIR / "data" / "points_table.parquet"
     df = pd.read_parquet(table_path)
     print(f"Loaded {len(df)} points from {table_path}")
 
@@ -38,8 +38,8 @@ def plot_class_imbalance(table_path=None):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{p:.1f}%", ha="center", va="bottom", fontsize=8)
     fig.tight_layout()
 
-    RESULTS_DIR.mkdir(exist_ok=True)
-    plot_path = RESULTS_DIR / "class_counts.png"
+    plot_path = RESULTS_DIR / "class_imbalance" / "class_counts.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(plot_path, dpi=150)
     print(f"Saved plot to {plot_path}")
 
