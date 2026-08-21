@@ -58,18 +58,21 @@ def run_bin_sweep(
     random_state: int = 0,
 ) -> pd.DataFrame:
     """Builds histogram-encoded features at each candidate bin count and runs both models
-    (see separability_probe.run_probe) at each, scoring by macro-average per-class one-vs-rest
-    ROC-AUC - the number that should decide the bin count. Cached to results/bin_sweep_results.parquet
-    keyed by the exact bin_counts requested (each RF fit here takes minutes); skips the sweep
-    entirely if the cache already covers the same bin_counts. Prints and returns one row per
-    (bin_count, model)."""
+    (see separability_probe.run_probe) at each. Reports macro-average ROC-AUC *and*
+    precision/recall/f1 - AUC is threshold-independent and doesn't reflect the actual argmax
+    operating point once class weighting shifts the decision boundary, so a bin count picked on
+    AUC alone isn't verified against the metrics that describe real deployed behavior. Cached to
+    results/bin_sweep_results.parquet keyed by the exact bin_counts requested (each RF fit here
+    takes minutes); skips the sweep entirely if the cache already covers the same bin_counts.
+    Prints a per-class precision/recall/f1 table for every (bin_count, model) and returns one
+    summary row per (bin_count, model)."""
     if SWEEP_CACHE.exists():
         cached = pd.read_parquet(SWEEP_CACHE)
-        if set(cached["n_bins"].unique()) == set(bin_counts):
+        if set(cached["n_bins"].unique()) == set(bin_counts) and "macro_f1" in cached.columns:
             print(f"{SWEEP_CACHE} already covers bin_counts={bin_counts}, skipping sweep")
             print(cached.round(3).to_string(index=False))
             return cached
-        print(f"{SWEEP_CACHE} covers different bin_counts than requested, rebuilding")
+        print(f"{SWEEP_CACHE} covers different bin_counts (or an older schema) than requested, rebuilding")
 
     rows = []
     for n_bins in bin_counts:
@@ -83,9 +86,24 @@ def run_bin_sweep(
             X, y, groups, classes, n_splits=n_splits, random_state=random_state,
             verbose=False, save_confusion=False, tag=f"bins{n_bins}",
         )
-        for model_name, (_, auc_per_class, _) in results.items():
-            row = {"n_bins": n_bins, "model": model_name, "macro_auc": np.mean(list(auc_per_class.values()))}
+        for model_name, (_, auc_per_class, metrics_per_class, _) in results.items():
+            per_class = pd.DataFrame(metrics_per_class).T
+            print(f"\nn_bins={n_bins}, {model_name} - precision/recall/f1 per class:")
+            print(per_class.round(3).to_string())
+
+            row = {
+                "n_bins": n_bins,
+                "model": model_name,
+                "macro_auc": np.mean(list(auc_per_class.values())),
+                "macro_precision": per_class["precision"].mean(),
+                "macro_recall": per_class["recall"].mean(),
+                "macro_f1": per_class["f1"].mean(),
+            }
             row.update({f"auc_{cls}": auc for cls, auc in auc_per_class.items()})
+            for cls, m in metrics_per_class.items():
+                row[f"precision_{cls}"] = m["precision"]
+                row[f"recall_{cls}"] = m["recall"]
+                row[f"f1_{cls}"] = m["f1"]
             rows.append(row)
         print(f"n_bins={n_bins} done ({len(feature_cols)} features)")
 
@@ -93,7 +111,7 @@ def run_bin_sweep(
     RESULTS_DIR.mkdir(exist_ok=True)
     summary.to_parquet(SWEEP_CACHE)
     print(f"Saved {SWEEP_CACHE}")
-    print(summary.round(3).to_string(index=False))
+    print(summary[["n_bins", "model", "macro_auc", "macro_precision", "macro_recall", "macro_f1"]].round(3).to_string(index=False))
     return summary
 
 

@@ -10,7 +10,13 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import ConfusionMatrixDisplay, classification_report, confusion_matrix, roc_auc_score
+from sklearn.metrics import (
+    ConfusionMatrixDisplay,
+    classification_report,
+    confusion_matrix,
+    precision_recall_fscore_support,
+    roc_auc_score,
+)
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 
@@ -60,7 +66,11 @@ def run_probe(
     per-class one-vs-rest ROC-AUC. `verbose` gates the classification_report / pairwise-AUC
     prints - off for sweeps over many configurations where per-run detail is just noise.
     `save_confusion` gates the row-normalized confusion matrix plot, saved to
-    results/{tag}_confusion_matrix_<model>.png. Returns {model_name: (report, auc_per_class,
+    results/{tag}_confusion_matrix_<model>.png. High AUC does not imply good precision/recall -
+    AUC is threshold-independent, but class weighting shifts the actual argmax decision boundary,
+    so `metrics_per_class` (precision/recall/f1/support at that operating point, from
+    precision_recall_fscore_support) is returned alongside auc_per_class rather than assuming
+    one implies the other. Returns {model_name: (report, auc_per_class, metrics_per_class,
     fig_or_None)}."""
     splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     train_idx, test_idx = next(splitter.split(X, y, groups))
@@ -102,6 +112,14 @@ def run_probe(
         auc_scores = roc_auc_score(y_test, y_proba, multi_class="ovr", average=None, labels=clf.classes_)
         auc_per_class = dict(zip(clf.classes_, auc_scores))
 
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_test, y_pred, labels=classes, zero_division=0
+        )
+        metrics_per_class = {
+            cls: {"precision": p, "recall": r, "f1": f, "support": int(s)}
+            for cls, p, r, f, s in zip(classes, precision, recall, f1, support)
+        }
+
         if verbose:
             print(f"\n=== {name} ===")
             print(report)
@@ -128,6 +146,6 @@ def run_probe(
             if verbose:
                 print(f"Saved {path}")
 
-        results[name] = (report, auc_per_class, fig)
+        results[name] = (report, auc_per_class, metrics_per_class, fig)
 
     return results
