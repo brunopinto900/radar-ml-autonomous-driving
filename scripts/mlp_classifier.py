@@ -35,9 +35,12 @@ RANDOM_STATE = 0
 CLASS_TO_IDX = {cls: i for i, cls in enumerate(FINAL_CLASSES)}
 
 MLP_DIR = RESULTS_DIR / "mlp"
-HISTORY_CACHE = MLP_DIR / "mlp_training_history.json"
-MODEL_CACHE = MLP_DIR / "mlp_model.pt"
-CURVES_PATH = MLP_DIR / "mlp_training_curves.png"
+HISTORY_FILENAME = "mlp_training_history.json"
+MODEL_FILENAME = "mlp_model.pt"
+CURVES_FILENAME = "mlp_training_curves.png"
+VAL_METRICS_FILENAME = "mlp_val_metrics.json"
+CONFUSION_MATRIX_FILENAME = "mlp_confusion_matrix.png"
+METRICS_BAR_FILENAME = "mlp_precision_recall_f1.png"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -159,36 +162,36 @@ def evaluate_test(model, X_test: np.ndarray, y_test: np.ndarray) -> float:
     return test_acc
 
 
-VAL_METRICS_CACHE = MLP_DIR / "mlp_val_metrics.json"
-CONFUSION_MATRIX_PATH = MLP_DIR / "mlp_confusion_matrix.png"
-METRICS_BAR_PATH = MLP_DIR / "mlp_precision_recall_f1.png"
-
-
-def evaluate_val_metrics(df: pd.DataFrame):
+def evaluate_val_metrics(df: pd.DataFrame, output_dir=MLP_DIR):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
-    model (MODEL_CACHE) - never retrains, only loads. Rebuilding val's feature vectors (bin edges
-    fit on train, applied to val) and running one forward pass is cheap either way (not training),
-    so it's redone each call; only the actual training step is skipped, via the model cache. Uses
-    val, not test, for the same reason the training curves did - test stays untouched until a
-    deliberate one-time check. Numeric metrics are cached to results/mlp_val_metrics.json
-    (skip-if-cached printing, but the confusion matrix and bar plots are still regenerated - cheap).
-    Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
+    model in `output_dir` - never retrains, only loads. Rebuilding val's feature vectors (bin
+    edges fit on train, applied to val) and running one forward pass is cheap either way (not
+    training), so it's redone each call; only the actual training step is skipped, via the model
+    cache. Uses val, not test, for the same reason the training curves did - test stays untouched
+    until a deliberate one-time check. Numeric metrics are cached to
+    output_dir/mlp_val_metrics.json (skip-if-cached printing, but the confusion matrix and bar
+    plots are still regenerated - cheap). Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
-    if not MODEL_CACHE.exists():
-        raise FileNotFoundError(f"{MODEL_CACHE} doesn't exist - run run_training() first")
+    model_cache = output_dir / MODEL_FILENAME
+    val_metrics_cache = output_dir / VAL_METRICS_FILENAME
+    confusion_matrix_path = output_dir / CONFUSION_MATRIX_FILENAME
+    metrics_bar_path = output_dir / METRICS_BAR_FILENAME
+
+    if not model_cache.exists():
+        raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
 
     _, _, X_val, y_val, _, _, _ = prepare_split_features(df)
 
     model = MLP(input_dim=X_val.shape[1]).to(DEVICE)
-    model.load_state_dict(torch.load(MODEL_CACHE, map_location=DEVICE))
+    model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
     model.eval()
     with torch.no_grad():
         y_pred = model(torch.tensor(X_val, device=DEVICE)).argmax(dim=1).cpu().numpy()
 
-    if VAL_METRICS_CACHE.exists():
-        metrics_df = pd.read_json(VAL_METRICS_CACHE, orient="index")
-        print(f"{VAL_METRICS_CACHE} already cached, reusing")
+    if val_metrics_cache.exists():
+        metrics_df = pd.read_json(val_metrics_cache, orient="index")
+        print(f"{val_metrics_cache} already cached, reusing")
     else:
         precision, recall, f1, support = precision_recall_fscore_support(
             y_val, y_pred, labels=range(len(FINAL_CLASSES)), zero_division=0
@@ -196,9 +199,9 @@ def evaluate_val_metrics(df: pd.DataFrame):
         metrics_df = pd.DataFrame(
             {"precision": precision, "recall": recall, "f1": f1, "support": support}, index=FINAL_CLASSES
         )
-        MLP_DIR.mkdir(parents=True, exist_ok=True)
-        metrics_df.to_json(VAL_METRICS_CACHE, orient="index", indent=2)
-        print(f"Saved {VAL_METRICS_CACHE}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metrics_df.to_json(val_metrics_cache, orient="index", indent=2)
+        print(f"Saved {val_metrics_cache}")
     print("per-class precision/recall/f1 (val):")
     print(metrics_df.round(3).to_string())
 
@@ -211,9 +214,9 @@ def evaluate_val_metrics(df: pd.DataFrame):
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     fig.tight_layout()
 
-    MLP_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(CONFUSION_MATRIX_PATH, dpi=150)
-    print(f"Saved {CONFUSION_MATRIX_PATH}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(confusion_matrix_path, dpi=150)
+    print(f"Saved {confusion_matrix_path}")
 
     bar_fig, bar_ax = plt.subplots(figsize=(9, 5))
     metrics_df[["precision", "recall", "f1"]].plot(kind="bar", ax=bar_ax, edgecolor="k")
@@ -224,13 +227,13 @@ def evaluate_val_metrics(df: pd.DataFrame):
     plt.setp(bar_ax.get_xticklabels(), rotation=45, ha="right")
     bar_fig.tight_layout()
 
-    bar_fig.savefig(METRICS_BAR_PATH, dpi=150)
-    print(f"Saved {METRICS_BAR_PATH}")
+    bar_fig.savefig(metrics_bar_path, dpi=150)
+    print(f"Saved {metrics_bar_path}")
 
     return metrics_df, fig, bar_fig
 
 
-def plot_training_curves(history: list[dict]):
+def plot_training_curves(history: list[dict], output_dir=MLP_DIR):
     import matplotlib.pyplot as plt
 
     df = pd.DataFrame(history)
@@ -251,9 +254,10 @@ def plot_training_curves(history: list[dict]):
     ax_acc.set_title("MLP training curves (train vs val accuracy, train cost)")
     fig.tight_layout()
 
-    MLP_DIR.mkdir(parents=True, exist_ok=True)
-    fig.savefig(CURVES_PATH, dpi=150)
-    print(f"Saved {CURVES_PATH}")
+    curves_path = output_dir / CURVES_FILENAME
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(curves_path, dpi=150)
+    print(f"Saved {curves_path}")
     return fig
 
 
@@ -263,34 +267,41 @@ def run_training(
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
+    output_dir=MLP_DIR,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
-    config was already run), plots train-vs-val curves. Returns (model, history, X_test, y_test)
-    - X_test/y_test are returned but NOT evaluated here; call evaluate_test explicitly once."""
+    config was already run), plots train-vs-val curves. Writes to `output_dir` (default MLP_DIR) -
+    pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a long run's cache
+    separate from the default baseline instead of overwriting it. Returns (model, history, X_test,
+    y_test) - X_test/y_test are returned but NOT evaluated here; call evaluate_test explicitly
+    once."""
     cache_key = {
         "n_bins": N_BINS, "hidden_dim": HIDDEN_DIM, "epochs": epochs, "batch_size": batch_size,
         "lr": lr, "random_state": random_state,
     }
+    history_cache = output_dir / HISTORY_FILENAME
+    model_cache = output_dir / MODEL_FILENAME
+
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(df)
 
-    if HISTORY_CACHE.exists() and MODEL_CACHE.exists():
-        cached = json.loads(HISTORY_CACHE.read_text())
+    if history_cache.exists() and model_cache.exists():
+        cached = json.loads(history_cache.read_text())
         if cached.get("key") == cache_key:
-            print(f"{HISTORY_CACHE} already matches this config, loading cached model + history")
+            print(f"{history_cache} already matches this config, loading cached model + history")
             model = MLP(input_dim=X_train.shape[1]).to(DEVICE)
-            model.load_state_dict(torch.load(MODEL_CACHE, map_location=DEVICE))
-            plot_training_curves(cached["history"])
+            model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+            plot_training_curves(cached["history"], output_dir=output_dir)
             return model, cached["history"], X_test, y_test
-        print(f"{HISTORY_CACHE} doesn't match this config, retraining")
+        print(f"{history_cache} doesn't match this config, retraining")
 
     model, history = train_mlp(X_train, y_train, X_val, y_val, epochs=epochs, batch_size=batch_size, lr=lr, random_state=random_state)
 
-    MLP_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_CACHE.write_text(json.dumps({"key": cache_key, "history": history}, indent=2))
-    torch.save(model.state_dict(), MODEL_CACHE)
-    print(f"Saved {HISTORY_CACHE} and {MODEL_CACHE}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    history_cache.write_text(json.dumps({"key": cache_key, "history": history}, indent=2))
+    torch.save(model.state_dict(), model_cache)
+    print(f"Saved {history_cache} and {model_cache}")
 
-    plot_training_curves(history)
+    plot_training_curves(history, output_dir=output_dir)
     return model, history, X_test, y_test
 
 
