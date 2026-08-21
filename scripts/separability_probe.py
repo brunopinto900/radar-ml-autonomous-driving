@@ -149,3 +149,81 @@ def run_probe(
         results[name] = (report, auc_per_class, metrics_per_class, fig)
 
     return results
+
+
+def run_probe_cv(
+    X: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    classes: list[str],
+    n_splits: int = 5,
+    random_state: int = 0,
+) -> dict:
+    """Like run_probe, but actually uses all n_splits folds instead of just the first, training
+    fresh on each fold's 4/5 and evaluating on its 1/5, then reporting mean +/- std across folds.
+    A single fold's AUC/F1 is noisy - see Design_Decisions.md decision 5's bus example, where a
+    small class's F1 swung around between adjacent bin counts on one fold alone - so a number
+    that's actually being compared or reported (rather than a quick default pick) should come
+    from here, not run_probe. No confusion matrix/report text (those need one fixed split to
+    display); prints and returns {model_name: {metric: {class: {"mean":.., "std":..}}}} for
+    metric in ("auc", "precision", "recall", "f1")."""
+    splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    model_names = ("logistic_regression", "random_forest")
+    fold_scores = {name: {"auc": [], "precision": [], "recall": [], "f1": []} for name in model_names}
+
+    for fold, (train_idx, test_idx) in enumerate(splitter.split(X, y, groups)):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        assert set(y_train) == set(classes) and set(y_test) == set(classes), (
+            f"fold {fold}: sequence-grouped split dropped a class from train or test"
+        )
+        assert not set(groups[train_idx]) & set(groups[test_idx]), f"fold {fold}: train/test share a sequence"
+
+        scaler = StandardScaler().fit(X_train)
+        X_train_scaled, X_test_scaled = scaler.transform(X_train), scaler.transform(X_test)
+        weights = class_weights(pd.Series(y_train))
+
+        models = {
+            "logistic_regression": (LogisticRegression(max_iter=1000, class_weight=weights), True),
+            "random_forest": (
+                RandomForestClassifier(n_estimators=300, class_weight=weights, random_state=random_state),
+                False,
+            ),
+        }
+        for name, (clf, needs_scaling) in models.items():
+            X_tr, X_te = (X_train_scaled, X_test_scaled) if needs_scaling else (X_train, X_test)
+            clf.fit(X_tr, y_train)
+            y_pred = clf.predict(X_te)
+            y_proba = clf.predict_proba(X_te)
+
+            auc_scores = roc_auc_score(y_test, y_proba, multi_class="ovr", average=None, labels=clf.classes_)
+            precision, recall, f1, _ = precision_recall_fscore_support(
+                y_test, y_pred, labels=classes, zero_division=0
+            )
+            fold_scores[name]["auc"].append(dict(zip(clf.classes_, auc_scores)))
+            fold_scores[name]["precision"].append(dict(zip(classes, precision)))
+            fold_scores[name]["recall"].append(dict(zip(classes, recall)))
+            fold_scores[name]["f1"].append(dict(zip(classes, f1)))
+        print(f"fold {fold + 1}/{n_splits} done")
+
+    summary = {}
+    for name, metrics in fold_scores.items():
+        summary[name] = {}
+        for metric, per_fold_dicts in metrics.items():
+            summary[name][metric] = {
+                cls: {
+                    "mean": float(np.mean([d[cls] for d in per_fold_dicts])),
+                    "std": float(np.std([d[cls] for d in per_fold_dicts])),
+                }
+                for cls in classes
+            }
+
+    for name in model_names:
+        print(f"\n=== {name} (mean +/- std over {n_splits} folds) ===")
+        for metric in ("auc", "precision", "recall", "f1"):
+            table = pd.DataFrame(summary[name][metric]).T
+            table.columns = [f"{metric}_mean", f"{metric}_std"]
+            print(table.round(3).to_string())
+
+    return summary

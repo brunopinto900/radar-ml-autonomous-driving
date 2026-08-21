@@ -3,14 +3,16 @@ running it through the same sequence-grouped LR+RF separability probe used for t
 decision - not by eyeballing the pooled bin-sweep plots in feature_distributions.py. Point-level
 features average only ~2.9 points/instance (1,443,816 points / 503,759 instances), so "which
 plot looks best" doesn't reflect what a typical instance's histogram actually looks like; bin
-count is a hyperparameter of the encoding, scored the same way any other one is.
+count is a hyperparameter of the encoding, scored the same way any other one is - via
+separability_probe.run_probe_cv's 5-fold-averaged AUC/precision/recall/f1 on the fixed split's
+train+val sequences (test excluded), not a single fold.
 """
 import numpy as np
 import pandas as pd
 
 from dataloader import RESULTS_DIR
 from feature_distributions import FINAL_CLASSES, POINT_LEVEL_FEATURES, apply_class_groups
-from separability_probe import run_probe
+from separability_probe import run_probe_cv
 from taxonomy_separability import add_relative_features
 
 INSTANCE_COLS = ["sequence_name", "timestamp", "track_id"]
@@ -57,18 +59,25 @@ def run_bin_sweep(
     n_splits: int = 5,
     random_state: int = 0,
 ) -> pd.DataFrame:
-    """Builds histogram-encoded features at each candidate bin count and runs both models
-    (see separability_probe.run_probe) at each. Reports macro-average ROC-AUC *and*
-    precision/recall/f1 - AUC is threshold-independent and doesn't reflect the actual argmax
-    operating point once class weighting shifts the decision boundary, so a bin count picked on
-    AUC alone isn't verified against the metrics that describe real deployed behavior. Cached to
-    results/bin_sweep_results.parquet keyed by the exact bin_counts requested (each RF fit here
-    takes minutes); skips the sweep entirely if the cache already covers the same bin_counts.
-    Prints a per-class precision/recall/f1 table for every (bin_count, model) and returns one
-    summary row per (bin_count, model)."""
+    """Builds histogram-encoded features at each candidate bin count and scores them with
+    separability_probe.run_probe_cv's proper n_splits-fold averaging (mean +/- std), restricted
+    to the fixed split's train+val sequences (results/sequence_split.json - test stays untouched).
+    A single fold isn't trustworthy enough to rank bin counts against (see Design_Decisions.md
+    decision 3's "Confirmed with 5-fold CV" subsection - this replaced an earlier single-fold
+    version of this sweep). Cached to results/bin_sweep_results.parquet keyed by the exact
+    bin_counts requested (each bin count trains LR+RF n_splits times - this takes a while);
+    skips the sweep entirely if the cache already covers the same bin_counts. run_probe_cv prints
+    its own per-class mean+/-std table for every (bin_count, model); returns one summary row per
+    (bin_count, model)."""
+    from sequence_split import load_split
+
+    splits = load_split()
+    trainval_sequences = set(splits["train"]) | set(splits["val"])
+    df = df.loc[df["sequence_name"].isin(trainval_sequences)]
+
     if SWEEP_CACHE.exists():
         cached = pd.read_parquet(SWEEP_CACHE)
-        if set(cached["n_bins"].unique()) == set(bin_counts) and "macro_f1" in cached.columns:
+        if set(cached["n_bins"].unique()) == set(bin_counts) and "macro_f1_mean" in cached.columns:
             print(f"{SWEEP_CACHE} already covers bin_counts={bin_counts}, skipping sweep")
             print(cached.round(3).to_string(index=False))
             return cached
@@ -82,36 +91,25 @@ def run_bin_sweep(
         y = features["group"].to_numpy(dtype=str)
         groups = features["sequence_name"].to_numpy(dtype=str)
 
-        results = run_probe(
-            X, y, groups, classes, n_splits=n_splits, random_state=random_state,
-            verbose=False, save_confusion=False, tag=f"bins{n_bins}",
-        )
-        for model_name, (_, auc_per_class, metrics_per_class, _) in results.items():
-            per_class = pd.DataFrame(metrics_per_class).T
-            print(f"\nn_bins={n_bins}, {model_name} - precision/recall/f1 per class:")
-            print(per_class.round(3).to_string())
-
-            row = {
-                "n_bins": n_bins,
-                "model": model_name,
-                "macro_auc": np.mean(list(auc_per_class.values())),
-                "macro_precision": per_class["precision"].mean(),
-                "macro_recall": per_class["recall"].mean(),
-                "macro_f1": per_class["f1"].mean(),
-            }
-            row.update({f"auc_{cls}": auc for cls, auc in auc_per_class.items()})
-            for cls, m in metrics_per_class.items():
-                row[f"precision_{cls}"] = m["precision"]
-                row[f"recall_{cls}"] = m["recall"]
-                row[f"f1_{cls}"] = m["f1"]
+        print(f"\nn_bins={n_bins} ({len(feature_cols)} features):")
+        cv_summary = run_probe_cv(X, y, groups, classes, n_splits=n_splits, random_state=random_state)
+        for model_name, metrics in cv_summary.items():
+            row = {"n_bins": n_bins, "model": model_name}
+            for metric in ("auc", "precision", "recall", "f1"):
+                means = [metrics[metric][cls]["mean"] for cls in classes]
+                row[f"macro_{metric}_mean"] = float(np.mean(means))
+                for cls in classes:
+                    row[f"{metric}_{cls}_mean"] = metrics[metric][cls]["mean"]
+                    row[f"{metric}_{cls}_std"] = metrics[metric][cls]["std"]
             rows.append(row)
-        print(f"n_bins={n_bins} done ({len(feature_cols)} features)")
+        print(f"n_bins={n_bins} done")
 
     summary = pd.DataFrame(rows)
     RESULTS_DIR.mkdir(exist_ok=True)
     summary.to_parquet(SWEEP_CACHE)
     print(f"Saved {SWEEP_CACHE}")
-    print(summary[["n_bins", "model", "macro_auc", "macro_precision", "macro_recall", "macro_f1"]].round(3).to_string(index=False))
+    macro_cols = ["n_bins", "model", "macro_auc_mean", "macro_precision_mean", "macro_recall_mean", "macro_f1_mean"]
+    print(summary[macro_cols].round(3).to_string(index=False))
     return summary
 
 

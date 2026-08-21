@@ -61,6 +61,18 @@ doppler_spread — per-instance median absolute deviation of vr_compensated (med
 large_vehicle / truck: Strong case for merging. Their pairwise AUC is the weakest of the three (0.632, only slightly above chance), and the RF confusion matrix shows large_vehicle being classified as truck 74% of the time. Both metrics point to the same conclusion, providing consistent evidence rather than noise.
 bus: The evidence is mixed. bus is well separated from large_vehicle (AUC 0.888), but poorly separated from truck (AUC 0.657, with 34% RF confusion). Therefore, the data does not support either treating bus as clearly distinct from both classes or merging it with both. Whether to merge bus is ultimately a design judgment based on the acceptable level of bus/truck ambiguity, or requires additional evidence such as more sequences or richer features.
 
+### Confirmed with 5-fold CV on the fixed train+val split (decision 5)
+
+The numbers above came from a single held-out fold with no separate test set. Re-running on decision 5's fixed split (test excluded entirely) with `separability_probe.run_probe_cv`'s proper 5-fold averaging adds precision/recall/f1, which weren't available before - computed on 68 of the 130 train+val sequences, since the other 62 contain none of these 3 classes at all (only 23 sequences ever contain a large_vehicle instance, 27 for bus, 59 for truck):
+
+| class | LR AUC | LR F1 | RF AUC | RF F1 |
+| --- | --- | --- | --- | --- |
+| large_vehicle | 0.779 ± 0.041 | 0.233 ± 0.052 | 0.791 ± 0.084 | 0.244 ± 0.069 |
+| truck | 0.677 ± 0.065 | 0.544 ± 0.055 | 0.775 ± 0.053 | 0.784 ± 0.070 |
+| bus | 0.756 ± 0.070 | 0.513 ± 0.063 | 0.818 ± 0.068 | 0.554 ± 0.105 |
+
+This strengthens the large_vehicle/truck merge case rather than changing it: AUC alone looks passable (0.78-0.79), but precision/recall expose `large_vehicle` as barely usable as its own class (RF precision 0.239, recall 0.287) - most of what a model calls "large_vehicle" is wrong, and most true instances are missed, sharper evidence than but consistent with the original 74%-confused-as-truck confusion matrix. The large std on `large_vehicle` (recall ± 0.142, nearly 50% relative) reflects that only 23 sequences ever contain one - a sequence-coverage scarcity on top of the instance-count imbalance already noted above.
+
 **Resolution:** merge large_vehicle into truck (target class name kept as `large_vehicle`, per the official scheme). Keep `bus` as its own class
 
 bus is kept separate despite the mixed pairwise, `run_separability_probe` trains on 5 hand-aggregated scalars (median RCS, median Doppler, two extents, one spread value) rather than full per-instance distributions. Actual classifier will use paper-faithful per-instance histograms. Revisit this later: if bus is still heavily confused with large_vehicle/truck in the real classifier's confusion matrix once real features are used, merge it in then, don't decide it now with a crude probe.
@@ -74,4 +86,33 @@ Percentiles are based on order statistics and therefore do not make assumptions 
 
 ## 3. Histogram bin count: 16
 
-Bin width: 16 bins selected based on the random-forest separability probe, not visualization. Separability improves substantially (AoC) from 8→16 bins but plateaus thereafter. Thus, 16 bins provide sufficient discriminative resolution without the sparsity and increased feature dimensionality of 32 bins.
+16 bins were selected from the random-forest separability probe, not from eyeballing the histograms: macro AUC improves substantially from 8→16 bins and plateaus thereafter. That plateau only clearly holds for AUC, though - per-class F1 (RF) splits by class rather than plateauing cleanly. `large_vehicle` peaks exactly at 16 (0.531) and drops at 32 (0.516), which directly supports the choice. `bus`, the smallest and most data-starved class, peaks at 4 bins (0.585) and never recovers (0.508 at 16, 0.511 at 32) - more resolution just means sparser, noisier features for it. `two_wheeler` keeps climbing through 32 (0.533→0.581), and is what pulls the macro-F1 average past 16 on its own. So there's no bin count that's best for every class: 16 is a reasonable compromise, avoids 32's added sparsity and dimensionality, and happens to be specifically optimal for `large_vehicle` - the class at the center of this whole investigation - rather than a universal optimum.
+
+**Revisit at Day 6/7:** this was picked by comparing 4 candidates on one held-out sequence-grouped split, with no separate validation/test set - proportionate for choosing an encoding default, not a validated final answer. Once the real baseline classifier has a proper train/val/test split, re-check whether 16 still holds up on genuinely untouched data, the same way `bus`'s merge decision (decision 1) is flagged for revisiting once the real classifier's confusion matrix exists.
+
+### Confirmed with 5-fold CV on the fixed train+val split (decision 5), now that decision 6 makes it load-bearing
+
+Re-run on decision 5's fixed split (test excluded) with `separability_probe.run_probe_cv`'s 5-fold averaging, since decision 6 committed to histogram encoding for the real classifier:
+
+| n_bins | model | macro AUC | macro F1 |
+| --- | --- | --- | --- |
+| 4 | RF | 0.874 | 0.577 |
+| 8 | RF | 0.911 | 0.618 |
+| 16 | RF | 0.925 | 0.647 |
+| 32 | RF | 0.928 | 0.650 |
+
+This strengthens the choice rather than changing it, and more cleanly than the original single-fold estimate: RF macro F1 16→32 is now +0.003 (essentially flat), versus +0.010 before. `large_vehicle` F1 plateaus exactly at 16 (0.611) and stays flat through 32, instead of dropping like the noisier single-fold run showed. `bus` still doesn't benefit from more bins - F1 hovers ~0.49-0.51 through 16, then drops to 0.455 at 32. `two_wheeler` is still the one class that keeps climbing (0.472→0.534→0.583→0.616), but its pull on the macro average is smaller now than the earlier estimate suggested. 16 remains the pick.
+
+## 4. Trusting RF/LR probe results despite using "simple" models
+
+Random-Forest and Logistic Regression are simpler than a neural net, so can their separability results be trusted? Yes. A Random Forest with 300 trees is a flexible nonlinear ensemble and is well suited to tabular feature vectors such as the 16-bin histograms + doppler_spread. The main limitation is not model capacity, but the hand-crafted representation: a low AUC indicates that the histogram encoding provides limited separating signal for that class pair, not that a larger model would necessarily extract more from the same 65 features. A raw point-based architecture could still learn a richer representation directly from the point sets, which this probe does not assess. Agreement between RF and LR further suggests that the observed separability is a property of the features rather than a model-specific artifact.
+
+## 5. Fixed train/val/test split, by sequence
+
+Every probe so far (taxonomy merge, bin range, bin count) reused the same single held-out fold across multiple candidates to pick a winner - proportionate for picking encoding defaults (decision 4), but it means each "winning" number is mildly inflated by having been selected among candidates checked against that same fold, and there was no genuinely untouched data to report a final, honest number against.
+
+**Decision:** split sequences (not instances, not scans) once into train/val/test (~70/15/15 - `scripts/sequence_split.py`), via two chained `StratifiedGroupKFold` calls (grouped by sequence_name, stratified by final class at the instance level), cached to `results/sequence_split.json` so it stays fixed rather than getting regenerated per run. Class balance held up well across all three splits despite grouping by sequence - even `bus`, the rarest class, stayed within 1.8-2.1% across train/val/test. `val` is for freely comparing candidates going forward (bin count revisit, model/architecture choices for the real classifier); `test` is set aside and checked exactly once, at the end, for the number that goes in the writeup.
+
+## 6. Feature representation: histogram encoding, not raw point sets
+
+Resolves the open question decision 4 flagged: whether a raw point-based architecture (consuming per-instance point sets directly, no hand-built histogram) could learn a richer representation than the histogram encoding RF/LR were probed on.
