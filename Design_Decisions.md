@@ -81,7 +81,7 @@ bus is kept separate despite the mixed pairwise, `run_separability_probe` trains
 
 The revisit trigger above fired: `bus` was heavily confused with `large_vehicle` in the real classifier's confusion matrix (`MLP_Decisions_and_Findings.md` section 3), and a direct ablation confirmed merging helps rather than just hiding the confusion, the combined class reaches F1=0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone (`MLP_Decisions_and_Findings.md` section 4).
 
-**Final resolution:** merge `bus` into `large_vehicle` too. Going forward, the working taxonomy is 5 classes (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`), matching the `bus_merged` variant in `scripts/mlp_variants.py`.
+**Final resolution:** merge `bus` into `large_vehicle` too. Going forward, the working taxonomy is 5 classes (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`), matching the `baseline` variant in `scripts/mlp_variants.py` (mlp_classifier.py's own default). The original 6 class taxonomy is kept for reference as the `bus_separate` variant.
 
 ## 2. Histogram bin range: percentile clip, not mean ± kσ
 Two approaches can be used to define a feature’s histogram range while limiting the influence of outliers: [p1, p99], as implemented in feature_distributions.py and histogram_separability.py, or the common alternative of mean ± kσ.

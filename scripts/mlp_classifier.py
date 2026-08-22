@@ -17,8 +17,8 @@ import pandas as pd
 import torch
 from torch import nn
 
-from dataloader import RESULTS_DIR
-from feature_distributions import FINAL_CLASSES, POINT_LEVEL_FEATURES
+from dataloader import MLP_CLASS_GROUPS, RESULTS_DIR
+from feature_distributions import MLP_CLASSES, POINT_LEVEL_FEATURES
 from histogram_separability import build_histogram_features, fit_bin_edges
 from separability_probe import class_weights
 from sequence_split import load_split
@@ -31,8 +31,6 @@ EPOCHS = 50
 BATCH_SIZE = 128
 RANDOM_STATE = 0
 # ------------------------
-
-CLASS_TO_IDX = {cls: i for i, cls in enumerate(FINAL_CLASSES)}
 
 MLP_DIR = RESULTS_DIR / "mlp"
 HISTORY_FILENAME = "mlp_training_history.json"
@@ -49,7 +47,7 @@ class MLP(nn.Module):
     """3 Linear layers: the first two ("inner") have HIDDEN_DIM output neurons each (with ReLU),
     the third maps to one logit per final class."""
 
-    def __init__(self, input_dim: int, hidden_dim: int = HIDDEN_DIM, num_classes: int = len(FINAL_CLASSES)):
+    def __init__(self, input_dim: int, hidden_dim: int = HIDDEN_DIM, num_classes: int = len(MLP_CLASSES)):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -63,9 +61,18 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def prepare_split_features(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES, n_bins: int = N_BINS):
+def apply_mlp_class_groups(df: pd.DataFrame) -> pd.DataFrame:
+    """Maps raw label_name to the current working class (dataloader.MLP_CLASS_GROUPS, bus
+    merged into large_vehicle), mirroring feature_distributions.apply_class_groups but for the
+    taxonomy this module actually trains on by default."""
+    df = df.copy()
+    df["group"] = df["label_name"].map(MLP_CLASS_GROUPS)
+    return df.loc[df["group"].notna()]
+
+
+def prepare_split_features(df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n_bins: int = N_BINS):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
-    edges. `classes` (default FINAL_CLASSES) lets a caller encode a different class taxonomy
+    edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
     against the same fixed, sequence level split (see mlp_variants.py). Returns
     (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X float32,
     y integer class indices in `classes` order."""
@@ -96,14 +103,14 @@ def train_mlp(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
-    classes: list[str] = FINAL_CLASSES,
+    classes: list[str] = MLP_CLASSES,
     epochs: int = EPOCHS,
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
 ):
     """Trains the MLP with Adam, class-count-weighted cross-entropy. `classes` (default
-    FINAL_CLASSES) is the class list y_train/y_val's integer labels index into."""
+    MLP_CLASSES) is the class list y_train/y_val's integer labels index into."""
     torch.manual_seed(random_state)
 
     weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
@@ -167,9 +174,9 @@ def evaluate_test(model, X_test: np.ndarray, y_test: np.ndarray) -> float:
     return test_acc
 
 
-def evaluate_val_metrics(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES, output_dir=MLP_DIR):
+def evaluate_val_metrics(df: pd.DataFrame, classes: list[str] = MLP_CLASSES, output_dir=MLP_DIR):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
-    model in `output_dir` - never retrains, only loads. `classes` (default FINAL_CLASSES) must
+    model in `output_dir` - never retrains, only loads. `classes` (default MLP_CLASSES) must
     match what the cached model at `output_dir` was trained with. Rebuilding val's feature
     vectors (bin edges fit on train, applied to val) and running one forward pass is cheap either
     way (not training), so it's redone each call; only the actual training step is skipped, via
@@ -269,7 +276,7 @@ def plot_training_curves(history: list[dict], output_dir=MLP_DIR):
 
 def run_training(
     df: pd.DataFrame,
-    classes: list[str] = FINAL_CLASSES,
+    classes: list[str] = MLP_CLASSES,
     epochs: int = EPOCHS,
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
@@ -277,7 +284,7 @@ def run_training(
     output_dir=MLP_DIR,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
-    config was already run), plots train-vs-val curves. `classes` (default FINAL_CLASSES) lets a
+    config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
     caller train on a different class taxonomy against the same fixed split (see
     mlp_variants.py). Writes to `output_dir` (default MLP_DIR) - pass a different
     directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a run's cache separate from the default
@@ -317,11 +324,10 @@ def run_training(
 
 if __name__ == "__main__":
     from build_points_table import build_and_save_points_table
-    from feature_distributions import apply_class_groups
     from taxonomy_separability import add_relative_features
 
     df = build_and_save_points_table()
     df = add_relative_features(df)
-    df = apply_class_groups(df)
+    df = apply_mlp_class_groups(df)
 
-    run_training(df)  # uses the EPOCHS/BATCH_SIZE/LEARNING_RATE constants above
+    run_training(df)  # uses MLP_CLASSES and the EPOCHS/BATCH_SIZE/LEARNING_RATE constants above

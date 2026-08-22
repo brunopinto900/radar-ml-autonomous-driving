@@ -13,6 +13,12 @@ from dataloader import CLASS_GROUPS, RESULTS_DIR
 from taxonomy_separability import add_relative_features
 
 FINAL_CLASSES = ["car", "large_vehicle", "bus", "two_wheeler", "pedestrian", "pedestrian_group"]
+
+# current working taxonomy (Design_Decisions.md decision 1's final resolution: bus merged into
+# large_vehicle too), matches dataloader.MLP_CLASS_GROUPS. Kept separate from FINAL_CLASSES for
+# the same reason MLP_CLASS_GROUPS is kept separate from CLASS_GROUPS.
+MLP_CLASSES = ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"]
+
 POINT_LEVEL_FEATURES = ["rcs", "vr_compensated", "x_rel", "y_rel"]
 INSTANCE_LEVEL_FEATURES = ["doppler_spread"]
 HISTOGRAM_FEATURES = POINT_LEVEL_FEATURES + INSTANCE_LEVEL_FEATURES

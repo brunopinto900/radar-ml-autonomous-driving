@@ -1,24 +1,25 @@
-"""One off ablation: does Design_Decisions.md decision 1's class taxonomy (merge truck/train into
-large_vehicle, keep bus separate) actually help the downstream MLP, versus two alternatives, run
-through the same architecture/training config as mlp_classifier.py's standing model? Not meant to
-replace decision 1's LR/RF probe evidence, this is a downstream sanity check now that a real
-classifier exists, motivated by MLP_Decisions_and_Findings.md's bus/large_vehicle confusion.
+"""One off ablation that informed Design_Decisions.md decision 1's final resolution: does
+keeping bus separate from large_vehicle actually help the MLP, versus merging it in (the
+standing choice, mlp_variants.py's `baseline`), or splitting truck back out instead? Not meant
+to replace the LR/RF probe evidence, this is a downstream sanity check run through the same
+architecture/training config as mlp_classifier.py's standing model.
 
-Two variants, defined in mlp_variants.py and run together here:
+Two variants, defined in mlp_variants.py and run together here, both compared against the
+`baseline` (bus merged) variant:
 
-    bus_merged: fold bus into large_vehicle too (5 classes). Tests whether the bus/large_vehicle
-    confusion in the confusion matrix is better handled by not distinguishing them at all.
+    bus_separate: the original, pre-merge taxonomy (6 classes) - was bus actually better off on
+    its own?
 
-    truck_separate: undo the truck merge, so large_vehicle/truck/bus are three separate classes
-    (7 classes). Re tests decision 1's original merge call, through the MLP instead of the LR/RF
-    probe.
+    truck_separate: undo the truck merge too, so large_vehicle/truck/bus are three separate
+    classes (7 classes). Re tests decision 1's original truck merge call, through the MLP
+    instead of the LR/RF probe.
 
 Both reuse the fixed sequence level split (results/data/sequence_split.json) unchanged, since
 relabeling instances doesn't touch which sequences are in which split, and both train with
 mlp_classifier's standing hyperparameters (N_BINS, HIDDEN_DIM, LEARNING_RATE, EPOCHS,
 BATCH_SIZE). Findings: MLP_Decisions_and_Findings.md section 4.
 """
-TAXONOMY_VARIANTS = ["bus_merged", "truck_separate"]
+TAXONOMY_VARIANTS = ["bus_separate", "truck_separate"]
 
 
 if __name__ == "__main__":

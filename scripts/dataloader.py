@@ -44,6 +44,12 @@ CLASS_GROUPS = {
     "static": None,
 }
 
+# current working taxonomy, per Design_Decisions.md decision 1's final resolution: bus merged
+# into large_vehicle too. Kept separate from CLASS_GROUPS (not overwritten) since other cached
+# artifacts (results/data/sequence_split.json, the taxonomy/histogram CV tables) were computed
+# against CLASS_GROUPS's 6 class grouping and must not silently change if CLASS_GROUPS did.
+MLP_CLASS_GROUPS = {**CLASS_GROUPS, "bus": "large_vehicle"}
+
 # final training class -> plotting color, kept consistent with LABELS where the name matches
 FINAL_CLASS_COLORS = {
     "car": "tab:red",

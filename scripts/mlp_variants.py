@@ -1,20 +1,28 @@
 """Single source of truth for every trained MLP variant produced so far, run or load one by
-name instead of hand assembling classes/class_groups/output_dir per call. Covers the canonical
-baseline (mlp_classifier.py's standing config), the 1000 epoch run (MLP_Decisions_and_Findings.md
-section 2), and the two class taxonomy experiments (class_taxonomy_experiment.py,
-MLP_Decisions_and_Findings.md section 4).
+name instead of hand assembling classes/class_groups/output_dir per call. `baseline` is the
+current working model (bus merged into large_vehicle, Design_Decisions.md decision 1's final
+resolution) and lives at MLP_DIR, mlp_classifier.py's own default. `bus_separate` is the
+original, pre-merge taxonomy, kept for reference/comparison, not the standing model anymore.
+`epochs_1000` and `truck_separate` are the two ablations that informed the merge decision
+(MLP_Decisions_and_Findings.md sections 2 and 4).
 """
-from dataloader import CLASS_GROUPS, RESULTS_DIR
-from feature_distributions import FINAL_CLASSES
+from dataloader import CLASS_GROUPS, MLP_CLASS_GROUPS, RESULTS_DIR
+from feature_distributions import FINAL_CLASSES, MLP_CLASSES
 from mlp_classifier import MLP_DIR, evaluate_val_metrics, run_training
 
 EXPERIMENT_DIR = RESULTS_DIR / "mlp" / "class_taxonomy_experiment"
 
 MLP_VARIANTS = {
     "baseline": {
+        "classes": MLP_CLASSES,
+        "class_groups": MLP_CLASS_GROUPS,
+        "output_dir": MLP_DIR,
+        "run_kwargs": {},
+    },
+    "bus_separate": {
         "classes": FINAL_CLASSES,
         "class_groups": CLASS_GROUPS,
-        "output_dir": MLP_DIR,
+        "output_dir": MLP_DIR / "bus_separate",
         "run_kwargs": {},
     },
     "epochs_1000": {
@@ -22,12 +30,6 @@ MLP_VARIANTS = {
         "class_groups": CLASS_GROUPS,
         "output_dir": MLP_DIR / "epochs_1000",
         "run_kwargs": {"epochs": 1000},
-    },
-    "bus_merged": {
-        "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
-        "class_groups": {**CLASS_GROUPS, "bus": "large_vehicle"},
-        "output_dir": EXPERIMENT_DIR / "bus_merged",
-        "run_kwargs": {},
     },
     "truck_separate": {
         "classes": ["car", "large_vehicle", "truck", "bus", "two_wheeler", "pedestrian", "pedestrian_group"],

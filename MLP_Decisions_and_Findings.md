@@ -1,6 +1,6 @@
 ## Model config
 
-**Architecture:** 3 layer MLP (2 hidden layers of 16 units each, ReLU), input 65 features, output 6 classes (`FINAL_CLASSES`).
+**Architecture:** 3 layer MLP (2 hidden layers of 16 units each, ReLU), input 65 features, output 5 classes (`MLP_CLASSES`: `car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`; bus merged into large_vehicle per decision 1's final resolution).
 
 **Feature design:** per instance histogram encoding. `rcs`, `vr_compensated`, `x_rel`, `y_rel` each binned into N_BINS=16 fraction of points per bin columns (64 dims total), plus `doppler_spread` appended unbinned (1 dim), for 65 dims total. Bin edges use the 1st to 99th percentile range, fit on train only and reused unchanged for val/test.
 
@@ -30,7 +30,7 @@ Increasing training from 50 to 1000 epochs produced only a small macro F1 improv
 
 **Decision:** retain EPOCHS=50.
 
-## 3. Confusion matrix findings (epochs=50 baseline, `results/mlp/mlp_confusion_matrix.png`)
+## 3. Confusion matrix findings (epochs=50, original 6 class taxonomy, `results/mlp/bus_separate/mlp_confusion_matrix.png`)
 
 Row-normalized, val set:
 
@@ -43,14 +43,14 @@ Row-normalized, val set:
 
 **Cross-check against section 2 above:** the confusion isn't scattered, it clusters within car/large_vehicle/bus (all "vehicle" classes) and separately within pedestrian/pedestrian_group, rather than spreading across unrelated classes. That pattern reads more like a feature-separability ceiling (the histogram features can't fully tell `bus` and `large_vehicle` apart) than pure gradient starvation. It's also in tension with the starvation story that `bus`'s recall (71%) is *higher* than `two_wheeler`'s (52%), despite `bus` being the far rarer class (1.9% vs 7.0% of train). If rarity/starvation were the dominant driver, that ordering would likely be reversed. This is what motivated the taxonomy experiment below.
 
-## 4. Class taxonomy experiment (`bus_merged` vs `truck_separate`, 50 epochs each)
+## 4. Class taxonomy experiment (bus merged vs `bus_separate` vs `truck_separate`, 50 epochs each)
 
-Macro F1: baseline (6 classes) 0.611, `bus_merged` (5 classes) 0.686, `truck_separate` (7 classes) 0.541.
+Macro F1: `bus_separate` (original 6 classes) 0.611, bus merged (5 classes, now `baseline`) 0.686, `truck_separate` (7 classes) 0.541.
 
-`bus_merged`: folding `bus` into `large_vehicle` raises the combined class to F1=0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone in the baseline. Supports merging `bus` in too, extending `Design_Decisions.md` decision 1's logic.
+Bus merged: folding `bus` into `large_vehicle` raises the combined class to F1=0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone in `bus_separate`. Supports merging `bus` in too, extending `Design_Decisions.md` decision 1's logic. This variant is now `mlp_variants.py`'s `baseline`, and its results live at `results/mlp/` directly rather than under the experiment subfolder.
 
 `truck_separate`: splitting `truck` back out leaves pure `large_vehicle` at only 1,292 train instances, and it becomes nearly unusable (F1=0.098). Confirms decision 1's `truck` merge was correct.
 
-Scripts: `scripts/class_taxonomy_experiment.py`, `scripts/mlp_variants.py`. Results: `results/mlp/class_taxonomy_experiment/`.
+Scripts: `scripts/class_taxonomy_experiment.py`, `scripts/mlp_variants.py`. Results: `results/mlp/` (baseline), `results/mlp/bus_separate/`, `results/mlp/class_taxonomy_experiment/truck_separate/`.
 
 This directly informed `Design_Decisions.md` decision 1's final resolution: merge `bus` into `large_vehicle` too.

@@ -164,13 +164,14 @@ python3 scripts/mlp_classifier.py   # trains (or loads from cache) and writes to
 ## `scripts/mlp_variants.py` / `scripts/class_taxonomy_experiment.py`
 
 `mlp_variants.py` is the single source of truth for every trained MLP variant produced so far
-(`baseline`, `epochs_1000`, `bus_merged`, `truck_separate`) — each entry in `MLP_VARIANTS` maps
+(`baseline`, `bus_separate`, `epochs_1000`, `truck_separate`) — each entry in `MLP_VARIANTS` maps
 a name to its `classes`/`class_groups`/`output_dir`/hyperparameter overrides, so running or
-loading one is `run_variant(raw_df, "bus_merged")` instead of hand assembling those per call.
-`class_taxonomy_experiment.py` is the ablation that produced two of those variants: does
-decision 1's class taxonomy actually help the downstream MLP, versus folding `bus` into
-`large_vehicle` too, or splitting `truck` back out? See `MLP_Decisions_and_Findings.md` section 4
-for the results.
+loading one is `run_variant(raw_df, "bus_separate")` instead of hand assembling those per call.
+`baseline` (bus merged into large_vehicle) is the standing model and mlp_classifier.py's own
+default; `bus_separate` is the original, pre-merge taxonomy, kept for reference.
+`class_taxonomy_experiment.py` is the ablation that led to that merge decision: does keeping
+`bus` separate actually help the downstream MLP, versus merging it in, or splitting `truck`
+back out instead? See `MLP_Decisions_and_Findings.md` section 4 for the results.
 
 ```bash
 python3 scripts/mlp_variants.py <variant>              # defaults to "baseline"
