@@ -77,6 +77,12 @@ This strengthens the large_vehicle/truck merge case rather than changing it: AUC
 
 bus is kept separate despite the mixed pairwise, `run_separability_probe` trains on 5 hand-aggregated scalars (median RCS, median Doppler, two extents, one spread value) rather than full per-instance distributions. Actual classifier will use paper-faithful per-instance histograms. Revisit this later: if bus is still heavily confused with large_vehicle/truck in the real classifier's confusion matrix once real features are used, merge it in then, don't decide it now with a crude probe.
 
+### Revisited with the real MLP classifier
+
+The revisit trigger above fired: `bus` was heavily confused with `large_vehicle` in the real classifier's confusion matrix (`MLP_Decisions_and_Findings.md` section 3), and a direct ablation confirmed merging helps rather than just hiding the confusion, the combined class reaches F1=0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone (`MLP_Decisions_and_Findings.md` section 4).
+
+**Final resolution:** merge `bus` into `large_vehicle` too. Going forward, the working taxonomy is 5 classes (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`), matching the `bus_merged` variant in `scripts/mlp_variants.py`.
+
 ## 2. Histogram bin range: percentile clip, not mean ± kσ
 Two approaches can be used to define a feature’s histogram range while limiting the influence of outliers: [p1, p99], as implemented in feature_distributions.py and histogram_separability.py, or the common alternative of mean ± kσ.
 
@@ -106,6 +112,8 @@ This strengthens the choice rather than changing it, and more cleanly than the o
 ## 4. Trusting RF/LR probe results despite using "simple" models
 
 Random-Forest and Logistic Regression are simpler than a neural net, so can their separability results be trusted? Yes. A Random Forest with 300 trees is a flexible nonlinear ensemble and is well suited to tabular feature vectors such as the 16-bin histograms + doppler_spread. The main limitation is not model capacity, but the hand-crafted representation: a low AUC indicates that the histogram encoding provides limited separating signal for that class pair, not that a larger model would necessarily extract more from the same 65 features. A raw point-based architecture could still learn a richer representation directly from the point sets, which this probe does not assess. Agreement between RF and LR further suggests that the observed separability is a property of the features rather than a model-specific artifact.
+
+RF's own flexibility has a limit worth noting too, since it explains why RF and LR sometimes disagree. RF trains each tree on a bootstrap resample of the training instances, so a rare, sparsely distributed class ends up thin or absent in many resamples, similar to a rare class missing from training batches in the MLP (`MLP_Decisions_and_Findings.md` section 2). On `truck` (~31k instances, 59/130 sequences), RF clearly outperforms LR (F1 0.784 vs 0.544), enough data for its flexibility to pay off. On `large_vehicle` (~3.3k instances, 23/130 sequences), both models land in the same poor range (F1 0.244 vs 0.233): too little data for RF's flexibility to find anything real, so it converges to LR's ceiling instead of beating it.
 
 ## 5. Fixed train/val/test split, by sequence
 

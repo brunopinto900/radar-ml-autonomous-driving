@@ -63,23 +63,26 @@ class MLP(nn.Module):
         return self.net(x)
 
 
-def prepare_split_features(df: pd.DataFrame):
+def prepare_split_features(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES, n_bins: int = N_BINS):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
-    edges. Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy
-    arrays - X float32, y integer class indices (CLASS_TO_IDX order)."""
+    edges. `classes` (default FINAL_CLASSES) lets a caller encode a different class taxonomy
+    against the same fixed, sequence level split (see mlp_variants.py). Returns
+    (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X float32,
+    y integer class indices in `classes` order."""
+    class_to_idx = {cls: i for i, cls in enumerate(classes)}
     splits = load_split()
 
     train_df = df.loc[df["sequence_name"].isin(splits["train"])]
     val_df = df.loc[df["sequence_name"].isin(splits["val"])]
     test_df = df.loc[df["sequence_name"].isin(splits["test"])]
 
-    edges = fit_bin_edges(train_df, N_BINS, POINT_LEVEL_FEATURES)
+    edges = fit_bin_edges(train_df, n_bins, POINT_LEVEL_FEATURES)
 
     def to_xy(split_df):
-        features = build_histogram_features(split_df, N_BINS, FINAL_CLASSES, POINT_LEVEL_FEATURES, edges=edges)
+        features = build_histogram_features(split_df, n_bins, classes, POINT_LEVEL_FEATURES, edges=edges)
         feature_cols = [c for c in features.columns if c not in ("sequence_name", "group")]
         X = features[feature_cols].to_numpy(dtype="float32")
-        y = features["group"].map(CLASS_TO_IDX).to_numpy(dtype="int64")
+        y = features["group"].map(class_to_idx).to_numpy(dtype="int64")
         return X, y, feature_cols
 
     X_train, y_train, feature_cols = to_xy(train_df)
@@ -93,26 +96,28 @@ def train_mlp(
     y_train: np.ndarray,
     X_val: np.ndarray,
     y_val: np.ndarray,
+    classes: list[str] = FINAL_CLASSES,
     epochs: int = EPOCHS,
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
 ):
-    """Trains the MLP with Adam, class-count-weighted cross-entropy."""
+    """Trains the MLP with Adam, class-count-weighted cross-entropy. `classes` (default
+    FINAL_CLASSES) is the class list y_train/y_val's integer labels index into."""
     torch.manual_seed(random_state)
 
-    weights_by_class = class_weights(pd.Series([FINAL_CLASSES[i] for i in y_train]))
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
     weight_tensor = torch.tensor(
-        [weights_by_class[cls] for cls in FINAL_CLASSES], dtype=torch.float32, device=DEVICE
+        [weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE
     )
-    print(f"class weights: {dict(zip(FINAL_CLASSES, weight_tensor.tolist()))}")
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
 
     X_train_t = torch.tensor(X_train, device=DEVICE)
     y_train_t = torch.tensor(y_train, device=DEVICE)
     X_val_t = torch.tensor(X_val, device=DEVICE)
     y_val_t = torch.tensor(y_val, device=DEVICE)
 
-    model = MLP(input_dim=X_train.shape[1]).to(DEVICE)
+    model = MLP(input_dim=X_train.shape[1], num_classes=len(classes)).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
@@ -162,13 +167,14 @@ def evaluate_test(model, X_test: np.ndarray, y_test: np.ndarray) -> float:
     return test_acc
 
 
-def evaluate_val_metrics(df: pd.DataFrame, output_dir=MLP_DIR):
+def evaluate_val_metrics(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES, output_dir=MLP_DIR):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
-    model in `output_dir` - never retrains, only loads. Rebuilding val's feature vectors (bin
-    edges fit on train, applied to val) and running one forward pass is cheap either way (not
-    training), so it's redone each call; only the actual training step is skipped, via the model
-    cache. Uses val, not test, for the same reason the training curves did - test stays untouched
-    until a deliberate one-time check. Numeric metrics are cached to
+    model in `output_dir` - never retrains, only loads. `classes` (default FINAL_CLASSES) must
+    match what the cached model at `output_dir` was trained with. Rebuilding val's feature
+    vectors (bin edges fit on train, applied to val) and running one forward pass is cheap either
+    way (not training), so it's redone each call; only the actual training step is skipped, via
+    the model cache. Uses val, not test, for the same reason the training curves did - test stays
+    untouched until a deliberate one-time check. Numeric metrics are cached to
     output_dir/mlp_val_metrics.json (skip-if-cached printing, but the confusion matrix and bar
     plots are still regenerated - cheap). Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
@@ -181,9 +187,9 @@ def evaluate_val_metrics(df: pd.DataFrame, output_dir=MLP_DIR):
     if not model_cache.exists():
         raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
 
-    _, _, X_val, y_val, _, _, _ = prepare_split_features(df)
+    _, _, X_val, y_val, _, _, _ = prepare_split_features(df, classes=classes)
 
-    model = MLP(input_dim=X_val.shape[1]).to(DEVICE)
+    model = MLP(input_dim=X_val.shape[1], num_classes=len(classes)).to(DEVICE)
     model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
     model.eval()
     with torch.no_grad():
@@ -194,10 +200,10 @@ def evaluate_val_metrics(df: pd.DataFrame, output_dir=MLP_DIR):
         print(f"{val_metrics_cache} already cached, reusing")
     else:
         precision, recall, f1, support = precision_recall_fscore_support(
-            y_val, y_pred, labels=range(len(FINAL_CLASSES)), zero_division=0
+            y_val, y_pred, labels=range(len(classes)), zero_division=0
         )
         metrics_df = pd.DataFrame(
-            {"precision": precision, "recall": recall, "f1": f1, "support": support}, index=FINAL_CLASSES
+            {"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics_df.to_json(val_metrics_cache, orient="index", indent=2)
@@ -207,9 +213,9 @@ def evaluate_val_metrics(df: pd.DataFrame, output_dir=MLP_DIR):
 
     import matplotlib.pyplot as plt
 
-    cm = confusion_matrix(y_val, y_pred, labels=range(len(FINAL_CLASSES)), normalize="true")
+    cm = confusion_matrix(y_val, y_pred, labels=range(len(classes)), normalize="true")
     fig, ax = plt.subplots(figsize=(7, 6))
-    ConfusionMatrixDisplay(cm, display_labels=FINAL_CLASSES).plot(ax=ax, colorbar=False, values_format=".2f")
+    ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
     ax.set_title("MLP - val confusion matrix (row-normalized)")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     fig.tight_layout()
@@ -263,6 +269,7 @@ def plot_training_curves(history: list[dict], output_dir=MLP_DIR):
 
 def run_training(
     df: pd.DataFrame,
+    classes: list[str] = FINAL_CLASSES,
     epochs: int = EPOCHS,
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
@@ -270,11 +277,12 @@ def run_training(
     output_dir=MLP_DIR,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
-    config was already run), plots train-vs-val curves. Writes to `output_dir` (default MLP_DIR) -
-    pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a long run's cache
-    separate from the default baseline instead of overwriting it. Returns (model, history, X_test,
-    y_test) - X_test/y_test are returned but NOT evaluated here; call evaluate_test explicitly
-    once."""
+    config was already run), plots train-vs-val curves. `classes` (default FINAL_CLASSES) lets a
+    caller train on a different class taxonomy against the same fixed split (see
+    mlp_variants.py). Writes to `output_dir` (default MLP_DIR) - pass a different
+    directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a run's cache separate from the default
+    baseline instead of overwriting it. Returns (model, history, X_test, y_test) - X_test/y_test
+    are returned but NOT evaluated here; call evaluate_test explicitly once."""
     cache_key = {
         "n_bins": N_BINS, "hidden_dim": HIDDEN_DIM, "epochs": epochs, "batch_size": batch_size,
         "lr": lr, "random_state": random_state,
@@ -282,19 +290,21 @@ def run_training(
     history_cache = output_dir / HISTORY_FILENAME
     model_cache = output_dir / MODEL_FILENAME
 
-    X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(df)
+    X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(df, classes=classes)
 
     if history_cache.exists() and model_cache.exists():
         cached = json.loads(history_cache.read_text())
         if cached.get("key") == cache_key:
             print(f"{history_cache} already matches this config, loading cached model + history")
-            model = MLP(input_dim=X_train.shape[1]).to(DEVICE)
+            model = MLP(input_dim=X_train.shape[1], num_classes=len(classes)).to(DEVICE)
             model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
             plot_training_curves(cached["history"], output_dir=output_dir)
             return model, cached["history"], X_test, y_test
         print(f"{history_cache} doesn't match this config, retraining")
 
-    model, history = train_mlp(X_train, y_train, X_val, y_val, epochs=epochs, batch_size=batch_size, lr=lr, random_state=random_state)
+    model, history = train_mlp(
+        X_train, y_train, X_val, y_val, classes=classes, epochs=epochs, batch_size=batch_size, lr=lr, random_state=random_state
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     history_cache.write_text(json.dumps({"key": cache_key, "history": history}, indent=2))
