@@ -166,7 +166,7 @@ python3 scripts/mlp_classifier.py   # trains (or loads from cache) and writes to
 
 `MLP_CONFIG.json` (project root) is the single source of truth for every trained MLP variant
 produced so far (`baseline`, `bus_separate`, `epochs_1000`, `truck_separate`, `bs32`, `range_sc`,
-`hidden8`/`hidden32`/`hidden64`) — a data-only registry, each entry a `classes` list, a
+`hidden8`/`hidden32`/`hidden64`, `deep10`) — a data-only registry, each entry a `classes` list, a
 `class_groups_base` (`CLASS_GROUPS` or `MLP_CLASS_GROUPS`, referenced by name, never duplicated,
 so the real taxonomy mapping in `dataloader.py` stays the only source of truth) plus optional
 `class_groups_overrides`, an `output_dir` (relative to `results/mlp/`, `null` for the standing

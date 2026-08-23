@@ -84,6 +84,22 @@ Macro F1: 0.688 (`hidden8`), 0.686 (`baseline`, 16), 0.688 (`hidden32`), 0.688 (
 
 Checked per-class too, in case the macro average was hiding a real trade-off. It wasn't: every class's hidden_dim spread (0.003-0.026) is smaller than that same class's spread from split choice alone (0.056-0.386, measured in the split sensitivity check). `pedestrian_group` has the largest capacity spread (0.026) but it's still well inside its own split-choice spread (0.117); `two_wheeler` is the starkest, 0.005 from capacity against 0.386 from split choice. No class benefits from more or less capacity.
 
+## 7. Architecture depth: deep10 ablation (10 hidden layers)
+
+Same features/taxonomy/N_BINS=16 as `baseline`, only depth varied: `n_hidden_layers=10` instead of 2, same `hidden_dim=16`. `scripts/mlp_variants.py`'s `deep10`, results at `results/mlp/deep10/`.
+
+First attempt (`dropout=0.3`, no `batch_norm`, `lr=1e-5`, 180 epochs) collapsed: predicted only the majority class (`car`) for every point, macro F1 0.122. Train and val failed together, train loss froze near ln(5) and train accuracy also stayed low, the signature of gradient signal never propagating through 10 unnormalized layers rather than overfitting. Compounded by dropout applied at every one of the 10 layers (effective survival probability ~0.7^10 ≈ 3%) and a learning rate too small to make progress regardless.
+
+Fixed by adding `batch_norm=True` after each hidden layer, easing dropout to 0.1, and raising `lr` to 1e-3, changed together, so the fix isn't isolated to one lever. BatchNorm adds real per-epoch cost (25.3s vs 13.2s unnormalized), capping epochs at 100 to stay under a 45 minute budget; val accuracy plateaus by epoch 20-25 in a timing probe, so 100 leaves real margin.
+
+Retrained result: macro F1 0.709 vs `baseline`'s 0.686 (delta +0.023). Looks like a gain, but every per-class delta (`car` +0.023, `large_vehicle` +0.068, `two_wheeler` +0.002, `pedestrian` +0.005, `pedestrian_group` +0.014) sits inside that class's own split-choice noise spread (section 5), the same standard that ruled out `range_sc` and the `hidden_dim` sweep. Not a real improvement, and `two_wheeler`/`pedestrian`, the classes actually driving the macro F1 ceiling, are essentially untouched.
+
+**Decision:** retain the 2-hidden-layer baseline. Depth doesn't help once it's actually trainable, consistent with section 6: the bottleneck is the histogram feature representation, not model capacity in either width or depth.
+
+**Side finding, a real caching bug:** `evaluate_val_metrics` cached its numeric metrics keyed only by file existence, not by whether the underlying model had changed. Retraining `deep10` in place with the fixed config left a stale `mlp_val_metrics.json` from the collapsed first attempt, which got silently reused, so the first "fixed" result reported was actually the failed run's numbers. Fixed by invalidating the cache whenever it's older than `mlp_model.pt`.
+
+**Open, not acted on:** the 64 histogram-bin features are all bounded [0,1], but `doppler_spread` is unnormalized (train range 0-59.2, mean 0.233), a scale mismatch at the input layer. Adam's per-parameter step size, and for `deep10`, BatchNorm sitting right after the first layer, both blunt this, which is likely why it hasn't visibly broken anything, but it hasn't been tested directly (e.g. z-score standardizing `doppler_spread` on train stats).
+
 ## Key takeaways
 
 **Never compare metrics across two different splits, even both stratified by class proportion.** Section 5's `range_sc` cross check is the concrete example: comparing this project's fixed split against an independently built one swung `large_vehicle`'s recall by 20+ points and its dominant confusion (`large_vehicle -> car`) by 3x, with nothing about the model or features changing. A number sourced from outside this project's fixed split (`sequence_split.py`) isn't a caveat away from being comparable, it's a different measurement.

@@ -54,13 +54,18 @@ def run_variant(raw_df, variant: str):
     MLP_CONFIG.json for what's available. A variant may optionally set "features"/"extra_features"
     to swap the feature set instead of (or alongside) the taxonomy/hyperparameters - falls back
     to mlp_classifier.py's own defaults (POINT_LEVEL_FEATURES / doppler_spread) if absent.
-    `hidden_dim`, if set in "run_kwargs", also has to reach evaluate_val_metrics (not just
-    run_training), since reloading the cached model needs to reconstruct the exact same
-    architecture. Returns (model, history, metrics_df, cm_fig, bar_fig)."""
+    Architecture kwargs ("hidden_dim"/"n_hidden_layers"/"dropout"), if set in "run_kwargs", also
+    have to reach evaluate_val_metrics (not just run_training), since reloading the cached model
+    needs to reconstruct the exact same architecture ("weight_decay" is optimizer-only, doesn't
+    affect architecture, so it's excluded). Returns (model, history, metrics_df, cm_fig, bar_fig)."""
     config = MLP_VARIANTS[variant]
     df = build_variant_df(raw_df, variant)
     feature_kwargs = {k: config[k] for k in ("features", "extra_features") if k in config}
-    arch_kwargs = {k: config["run_kwargs"][k] for k in ("hidden_dim",) if k in config["run_kwargs"]}
+    arch_kwargs = {
+        k: config["run_kwargs"][k]
+        for k in ("hidden_dim", "n_hidden_layers", "dropout", "batch_norm")
+        if k in config["run_kwargs"]
+    }
     model, history, X_test, y_test = run_training(
         df, classes=config["classes"], output_dir=config["output_dir"], **feature_kwargs, **config["run_kwargs"]
     )

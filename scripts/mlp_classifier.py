@@ -44,18 +44,36 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class MLP(nn.Module):
-    """3 Linear layers: the first two ("inner") have HIDDEN_DIM output neurons each (with ReLU),
-    the third maps to one logit per final class."""
+    """`n_hidden_layers` Linear(+BatchNorm1d)+ReLU blocks (each hidden_dim wide, optionally
+    followed by Dropout(dropout) for regularization), then a final Linear mapping to one logit
+    per class. n_hidden_layers=2, dropout=0.0, batch_norm=False reproduces the original
+    3-linear-layer baseline exactly. batch_norm exists because a plain (unnormalized) stack of
+    10 Linear+ReLU+Dropout layers at hidden_dim=16 collapsed to predicting the majority class -
+    gradient signal degrading across depth with nothing to keep each layer's activations in a
+    well-scaled range (see MLP_Decisions_and_Findings.md's depth ablation)."""
 
-    def __init__(self, input_dim: int, hidden_dim: int = HIDDEN_DIM, num_classes: int = len(MLP_CLASSES)):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = HIDDEN_DIM,
+        num_classes: int = len(MLP_CLASSES),
+        n_hidden_layers: int = 2,
+        dropout: float = 0.0,
+        batch_norm: bool = False,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_classes),
-        )
+        layers = []
+        prev_dim = input_dim
+        for _ in range(n_hidden_layers):
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            if batch_norm:
+                layers.append(nn.BatchNorm1d(hidden_dim))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, num_classes))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
@@ -126,9 +144,15 @@ def train_mlp(
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
     hidden_dim: int = HIDDEN_DIM,
+    n_hidden_layers: int = 2,
+    dropout: float = 0.0,
+    weight_decay: float = 0.0,
+    batch_norm: bool = False,
 ):
     """Trains the MLP with Adam, class-count-weighted cross-entropy. `classes` (default
-    MLP_CLASSES) is the class list y_train/y_val's integer labels index into."""
+    MLP_CLASSES) is the class list y_train/y_val's integer labels index into. `n_hidden_layers`/
+    `dropout`/`weight_decay`/`batch_norm` default to 2/0.0/0.0/False, reproducing the original
+    2-hidden-layer, no-regularization baseline exactly."""
     torch.manual_seed(random_state)
 
     weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
@@ -142,8 +166,11 @@ def train_mlp(
     X_val_t = torch.tensor(X_val, device=DEVICE)
     y_val_t = torch.tensor(y_val, device=DEVICE)
 
-    model = MLP(input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    model = MLP(
+        input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
+        n_hidden_layers=n_hidden_layers, dropout=dropout, batch_norm=batch_norm,
+    ).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
     n = len(X_train_t)
@@ -200,16 +227,25 @@ def evaluate_val_metrics(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
     hidden_dim: int = HIDDEN_DIM,
+    n_hidden_layers: int = 2,
+    dropout: float = 0.0,
+    batch_norm: bool = False,
 ):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
-    model in `output_dir` - never retrains, only loads. `classes` (default MLP_CLASSES) must
-    match what the cached model at `output_dir` was trained with. Rebuilding val's feature
+    model in `output_dir` - never retrains, only loads. `classes`/`hidden_dim`/`n_hidden_layers`/
+    `dropout`/`batch_norm` (default MLP_CLASSES/HIDDEN_DIM/2/0.0/False) must match what the cached
+    model at `output_dir` was trained with, so the reconstructed architecture matches the saved
+    weights (weight_decay is optimizer-only, doesn't affect architecture, so isn't needed here).
+    Rebuilding val's feature
     vectors (bin edges fit on train, applied to val) and running one forward pass is cheap either
     way (not training), so it's redone each call; only the actual training step is skipped, via
     the model cache. Uses val, not test, for the same reason the training curves did - test stays
     untouched until a deliberate one-time check. Numeric metrics are cached to
-    output_dir/mlp_val_metrics.json (skip-if-cached printing, but the confusion matrix and bar
-    plots are still regenerated - cheap). Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
+    output_dir/mlp_val_metrics.json, reused only if that file is at least as new as model.pt -
+    otherwise a retrained model in the same output_dir would silently serve stale metrics from
+    whatever was trained there before. The confusion matrix and bar plots are always regenerated
+    fresh from the loaded model - cheap either way. Returns (metrics_df, confusion_matrix_fig,
+    bar_fig)."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
     model_cache = output_dir / MODEL_FILENAME
@@ -224,13 +260,16 @@ def evaluate_val_metrics(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits
     )
 
-    model = MLP(input_dim=X_val.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
+    model = MLP(
+        input_dim=X_val.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
+        n_hidden_layers=n_hidden_layers, dropout=dropout, batch_norm=batch_norm,
+    ).to(DEVICE)
     model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
     model.eval()
     with torch.no_grad():
         y_pred = model(torch.tensor(X_val, device=DEVICE)).argmax(dim=1).cpu().numpy()
 
-    if val_metrics_cache.exists():
+    if val_metrics_cache.exists() and val_metrics_cache.stat().st_mtime >= model_cache.stat().st_mtime:
         metrics_df = pd.read_json(val_metrics_cache, orient="index")
         print(f"{val_metrics_cache} already cached, reusing")
     else:
@@ -314,6 +353,10 @@ def run_training(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
     hidden_dim: int = HIDDEN_DIM,
+    n_hidden_layers: int = 2,
+    dropout: float = 0.0,
+    weight_decay: float = 0.0,
+    batch_norm: bool = False,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
@@ -321,14 +364,17 @@ def run_training(
     mlp_variants.py); `features`/`extra_features` (see prepare_split_features) let a caller swap
     the feature set instead, e.g. binning range_sc in place of doppler_spread; `splits` lets a
     caller evaluate a different candidate split instead of the standing fixed one (see
-    sequence_split.select_best_split); `hidden_dim` lets a caller change model capacity. Writes to
-    `output_dir` (default MLP_DIR) - pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}")
-    to keep a run's cache separate from the default baseline instead of overwriting it. Returns
-    (model, history, X_test, y_test) - X_test/y_test are returned but NOT evaluated here; call
+    sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers` let a caller change model
+    capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add regularization/stabilization
+    (default 0.0/0.0/False, off, reproducing the original baseline). Writes to `output_dir`
+    (default MLP_DIR) - pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a
+    run's cache separate from the default baseline instead of overwriting it. Returns (model,
+    history, X_test, y_test) - X_test/y_test are returned but NOT evaluated here; call
     evaluate_test explicitly once."""
     cache_key = {
-        "n_bins": N_BINS, "hidden_dim": hidden_dim, "epochs": epochs, "batch_size": batch_size,
-        "lr": lr, "random_state": random_state,
+        "n_bins": N_BINS, "hidden_dim": hidden_dim, "n_hidden_layers": n_hidden_layers,
+        "dropout": dropout, "weight_decay": weight_decay, "batch_norm": batch_norm,
+        "epochs": epochs, "batch_size": batch_size, "lr": lr, "random_state": random_state,
     }
     history_cache = output_dir / HISTORY_FILENAME
     model_cache = output_dir / MODEL_FILENAME
@@ -341,7 +387,10 @@ def run_training(
         cached = json.loads(history_cache.read_text())
         if cached.get("key") == cache_key:
             print(f"{history_cache} already matches this config, loading cached model + history")
-            model = MLP(input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
+            model = MLP(
+                input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
+                n_hidden_layers=n_hidden_layers, dropout=dropout, batch_norm=batch_norm,
+            ).to(DEVICE)
             model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
             plot_training_curves(cached["history"], output_dir=output_dir)
             return model, cached["history"], X_test, y_test
@@ -349,7 +398,8 @@ def run_training(
 
     model, history = train_mlp(
         X_train, y_train, X_val, y_val, classes=classes, epochs=epochs, batch_size=batch_size, lr=lr,
-        random_state=random_state, hidden_dim=hidden_dim,
+        random_state=random_state, hidden_dim=hidden_dim, n_hidden_layers=n_hidden_layers,
+        dropout=dropout, weight_decay=weight_decay, batch_norm=batch_norm,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
