@@ -18,7 +18,7 @@ import torch
 from torch import nn
 
 from dataloader import MLP_CLASS_GROUPS, RESULTS_DIR
-from feature_distributions import MLP_CLASSES, POINT_LEVEL_FEATURES
+from feature_distributions import INSTANCE_LEVEL_FEATURES, MLP_CLASSES, POINT_LEVEL_FEATURES
 from histogram_separability import build_histogram_features, fit_bin_edges
 from separability_probe import class_weights
 from sequence_split import load_split
@@ -70,26 +70,43 @@ def apply_mlp_class_groups(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df["group"].notna()]
 
 
-def prepare_split_features(df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n_bins: int = N_BINS):
+def prepare_split_features(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    n_bins: int = N_BINS,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    splits: dict[str, list[str]] | None = None,
+):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
     edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
-    against the same fixed, sequence level split (see mlp_variants.py). Returns
+    against the same fixed, sequence level split (see mlp_variants.py). `features` (default
+    POINT_LEVEL_FEATURES) are binned into `n_bins` columns each; `extra_features` (default
+    doppler_spread) are appended unbinned - a caller can swap doppler_spread for another
+    point-level feature by moving it into `features` and passing extra_features=[] instead (see
+    mlp_variants.py's "range_sc" variant). `splits` (default None) uses the project's standing
+    fixed split (load_split()) - pass an explicit {"train"/"val"/"test": [sequence_name, ...]}
+    dict instead to evaluate a different candidate split (see sequence_split.select_best_split),
+    without touching the standing one. Returns
     (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X float32,
     y integer class indices in `classes` order."""
     class_to_idx = {cls: i for i, cls in enumerate(classes)}
-    splits = load_split()
+    if splits is None:
+        splits = load_split()
 
     train_df = df.loc[df["sequence_name"].isin(splits["train"])]
     val_df = df.loc[df["sequence_name"].isin(splits["val"])]
     test_df = df.loc[df["sequence_name"].isin(splits["test"])]
 
-    edges = fit_bin_edges(train_df, n_bins, POINT_LEVEL_FEATURES)
+    edges = fit_bin_edges(train_df, n_bins, features)
 
     def to_xy(split_df):
-        features = build_histogram_features(split_df, n_bins, classes, POINT_LEVEL_FEATURES, edges=edges)
-        feature_cols = [c for c in features.columns if c not in ("sequence_name", "group")]
-        X = features[feature_cols].to_numpy(dtype="float32")
-        y = features["group"].map(class_to_idx).to_numpy(dtype="int64")
+        hist = build_histogram_features(
+            split_df, n_bins, classes, features, edges=edges, extra_features=extra_features
+        )
+        feature_cols = [c for c in hist.columns if c not in ("sequence_name", "group")]
+        X = hist[feature_cols].to_numpy(dtype="float32")
+        y = hist["group"].map(class_to_idx).to_numpy(dtype="int64")
         return X, y, feature_cols
 
     X_train, y_train, feature_cols = to_xy(train_df)
@@ -174,7 +191,14 @@ def evaluate_test(model, X_test: np.ndarray, y_test: np.ndarray) -> float:
     return test_acc
 
 
-def evaluate_val_metrics(df: pd.DataFrame, classes: list[str] = MLP_CLASSES, output_dir=MLP_DIR):
+def evaluate_val_metrics(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    output_dir=MLP_DIR,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    splits: dict[str, list[str]] | None = None,
+):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
     model in `output_dir` - never retrains, only loads. `classes` (default MLP_CLASSES) must
     match what the cached model at `output_dir` was trained with. Rebuilding val's feature
@@ -194,7 +218,9 @@ def evaluate_val_metrics(df: pd.DataFrame, classes: list[str] = MLP_CLASSES, out
     if not model_cache.exists():
         raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
 
-    _, _, X_val, y_val, _, _, _ = prepare_split_features(df, classes=classes)
+    _, _, X_val, y_val, _, _, _ = prepare_split_features(
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits
+    )
 
     model = MLP(input_dim=X_val.shape[1], num_classes=len(classes)).to(DEVICE)
     model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
@@ -282,11 +308,17 @@ def run_training(
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
     output_dir=MLP_DIR,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    splits: dict[str, list[str]] | None = None,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
     caller train on a different class taxonomy against the same fixed split (see
-    mlp_variants.py). Writes to `output_dir` (default MLP_DIR) - pass a different
+    mlp_variants.py); `features`/`extra_features` (see prepare_split_features) let a caller swap
+    the feature set instead, e.g. binning range_sc in place of doppler_spread; `splits` lets a
+    caller evaluate a different candidate split instead of the standing fixed one (see
+    sequence_split.select_best_split). Writes to `output_dir` (default MLP_DIR) - pass a different
     directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a run's cache separate from the default
     baseline instead of overwriting it. Returns (model, history, X_test, y_test) - X_test/y_test
     are returned but NOT evaluated here; call evaluate_test explicitly once."""
@@ -297,7 +329,9 @@ def run_training(
     history_cache = output_dir / HISTORY_FILENAME
     model_cache = output_dir / MODEL_FILENAME
 
-    X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(df, classes=classes)
+    X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits
+    )
 
     if history_cache.exists() and model_cache.exists():
         cached = json.loads(history_cache.read_text())

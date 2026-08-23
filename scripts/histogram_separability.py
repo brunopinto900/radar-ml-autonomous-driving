@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from dataloader import RESULTS_DIR
-from feature_distributions import FINAL_CLASSES, POINT_LEVEL_FEATURES, apply_class_groups
+from feature_distributions import FINAL_CLASSES, INSTANCE_LEVEL_FEATURES, POINT_LEVEL_FEATURES, apply_class_groups
 from separability_probe import run_probe_cv
 from taxonomy_separability import add_relative_features
 
@@ -36,14 +36,16 @@ def build_histogram_features(
     classes: list[str] = FINAL_CLASSES,
     features: list[str] = POINT_LEVEL_FEATURES,
     edges: dict[str, np.ndarray] | None = None,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
 ) -> pd.DataFrame:
     """One row per instance: each point-level feature becomes n_bins columns holding the
     fraction of that instance's own points landing in each bin - fraction, not raw count, so a
     busy instance's histogram encodes distribution shape rather than just point count. `edges`
     (see fit_bin_edges), if given, are used as-is instead of being recomputed from `df` - needed
     to encode val/test with edges fit on train only. Otherwise edges are fit from `df` itself
-    (fine when df is the only/whole pool being encoded, e.g. the CV probes). doppler_spread is
-    appended unbinned, since it's already one value per instance."""
+    (fine when df is the only/whole pool being encoded, e.g. the CV probes). `extra_features`
+    (default doppler_spread) are appended unbinned, since they're already one value per
+    instance - pass [] to skip (e.g. a feature-swap variant that bins everything)."""
     df = df.loc[df["group"].isin(classes)]
     if edges is None:
         edges = fit_bin_edges(df, n_bins, features)
@@ -65,7 +67,7 @@ def build_histogram_features(
 
     features_df = pd.concat(hist_frames, axis=1)
     extra = df.drop_duplicates(INSTANCE_COLS).set_index(INSTANCE_COLS, drop=False)
-    extra = extra[["doppler_spread", "group", "sequence_name"]]
+    extra = extra[extra_features + ["group", "sequence_name"]]
     return features_df.join(extra).reset_index(drop=True)
 
 

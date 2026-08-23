@@ -178,6 +178,22 @@ python3 scripts/mlp_variants.py <variant>              # defaults to "baseline"
 python3 scripts/class_taxonomy_experiment.py <variant> # defaults to running both taxonomy variants
 ```
 
+## `scripts/split_sensitivity.py`
+
+Checks how much the MLP's macro F1 depends on which valid split you happen to use, versus which
+split has the best-matching train/val feature distributions. Generates the handful of distinct
+valid splits at the fixed 70/15/15 proportions (`sequence_split.select_best_split`, scored by a
+two-sample Kolmogorov-Smirnov statistic per class per feature), then trains `mlp_classifier.py`'s
+baseline config on every one of them, only the split changes. See
+`MLP_Decisions_and_Findings.md`'s split selection finding for the result: macro F1 varied
+0.651-0.734 across the 6 candidates, uncorrelated with distributional match, so a metric
+difference has to clear that range before it's trustworthy. Cached to
+`results/mlp/split_search/fold_<n>/`, same caching as any other `mlp_classifier.py` run.
+
+```bash
+python3 scripts/split_sensitivity.py
+```
+
 ## `notebooks/`
 
 `data_analysis.ipynb` builds the points table, plots class imbalance, builds the fixed
