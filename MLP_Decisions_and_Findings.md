@@ -74,6 +74,16 @@ The val class counts don't match either (`pedestrian_group`: 21,562 old vs 17,85
 
 **Open question, not yet resolved:** does `range_sc`'s F1 gain reflect a real radar signal, or a range/point-sparsity shortcut (sparse points at long range predicted as `large_vehicle`/`car`, a failure mode observed independently in the older run)? Not yet tested. Candidate checks: per-class `range_sc` percentiles (is the confound even present in the data), a permutation test on the `range_sc` columns in val, or a counterfactual swap (overwrite `range_sc` on real pedestrian instances with typical `large_vehicle` values, check if the prediction flips). `range_sc` should not be treated as the better feature until one of these is actually run.
 
+## 6. Architecture capacity: hidden_dim ablation
+
+Is the 16-unit hidden layer a bottleneck, or does the histogram feature representation cap performance regardless of model size? Same architecture shape (2 hidden layers), same features/taxonomy/batch size/LR/epochs as `baseline`, only `hidden_dim` varied: 8, 32, 64, against the standing 16. `scripts/mlp_variants.py`'s `hidden8`/`hidden32`/`hidden64`, results at `results/mlp/hidden8/`, `results/mlp/hidden32/`, `results/mlp/hidden64/`.
+
+Macro F1: 0.688 (`hidden8`), 0.686 (`baseline`, 16), 0.688 (`hidden32`), 0.688 (`hidden64`). All within 0.002 of each other, far inside the measured noise floor (std 0.027, section 5). Going from 8 to 64 units, an 8x range, moves nothing.
+
+**Decision:** retain `HIDDEN_DIM=16`. The model isn't capacity-limited, the histogram feature representation is the ceiling, not the network's expressive power, consistent with the feature-separability-ceiling read of the `bus`/`large_vehicle` confusion in section 3.
+
+Checked per-class too, in case the macro average was hiding a real trade-off. It wasn't: every class's hidden_dim spread (0.003-0.026) is smaller than that same class's spread from split choice alone (0.056-0.386, measured in the split sensitivity check). `pedestrian_group` has the largest capacity spread (0.026) but it's still well inside its own split-choice spread (0.117); `two_wheeler` is the starkest, 0.005 from capacity against 0.386 from split choice. No class benefits from more or less capacity.
+
 ## Key takeaways
 
 **Never compare metrics across two different splits, even both stratified by class proportion.** Section 5's `range_sc` cross check is the concrete example: comparing this project's fixed split against an independently built one swung `large_vehicle`'s recall by 20+ points and its dominant confusion (`large_vehicle -> car`) by 3x, with nothing about the model or features changing. A number sourced from outside this project's fixed split (`sequence_split.py`) isn't a caveat away from being comparable, it's a different measurement.

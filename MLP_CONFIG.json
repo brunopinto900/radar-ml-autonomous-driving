@@ -1,0 +1,71 @@
+{
+  "_comment": "Single source of truth for every trained MLP variant, loaded and resolved by scripts/mlp_variants.py. JSON has no comment syntax, so '_'-prefixed keys are notes only, ignored by the loader. 'class_groups_base' must be 'CLASS_GROUPS' (original 6-class taxonomy) or 'MLP_CLASS_GROUPS' (standing 5-class, bus merged into large_vehicle) - both are resolved against the real dicts in dataloader.py, never duplicated here, so the taxonomy mapping itself always has exactly one source of truth. 'class_groups_overrides' (optional) merges on top of that base for a variant that needs one class to diverge, e.g. truck_separate. 'output_dir' is relative to MLP_DIR (results/mlp/); null means MLP_DIR itself, the standing baseline. 'features'/'extra_features' (optional) override mlp_classifier.py's own feature-set defaults. 'run_kwargs' (optional) overrides its hyperparameter defaults (epochs/batch_size/lr/hidden_dim).",
+  "variants": {
+    "baseline": {
+      "_note": "Current working model: bus merged into large_vehicle, Design_Decisions.md decision 1's final resolution. Lives at MLP_DIR, mlp_classifier.py's own default.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": null,
+      "run_kwargs": {}
+    },
+    "bus_separate": {
+      "_note": "Original, pre-merge taxonomy (bus kept separate). Kept for reference/comparison, not the standing model anymore.",
+      "classes": ["car", "large_vehicle", "bus", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "CLASS_GROUPS",
+      "output_dir": "bus_separate",
+      "run_kwargs": {}
+    },
+    "epochs_1000": {
+      "_note": "Ablation that informed the merge decision (MLP_Decisions_and_Findings.md section 2): 1000 epochs instead of 50, no meaningful gain past ~150-200.",
+      "classes": ["car", "large_vehicle", "bus", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "CLASS_GROUPS",
+      "output_dir": "epochs_1000",
+      "run_kwargs": {"epochs": 1000}
+    },
+    "truck_separate": {
+      "_note": "Ablation that informed the merge decision (section 4): un-merges truck too, confirms decision 1's truck merge was correct.",
+      "classes": ["car", "large_vehicle", "truck", "bus", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "CLASS_GROUPS",
+      "class_groups_overrides": {"truck": "truck"},
+      "output_dir": "class_taxonomy_experiment/truck_separate",
+      "run_kwargs": {}
+    },
+    "bs32": {
+      "_note": "Re-checks BATCH_SIZE=128 now that bus is merged: two_wheeler (7.0%) only needs bs=32, unlike bus's original 1.9%. Found no real difference (section 5).",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "bs32",
+      "run_kwargs": {"batch_size": 32, "lr": 1e-05}
+    },
+    "range_sc": {
+      "_note": "Swaps the feature set: range_sc binned like the other point-level features, in place of doppler_spread appended unbinned. Looked better, confirmed noise (section 5).",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "range_sc",
+      "features": ["rcs", "vr_compensated", "x_rel", "y_rel", "range_sc"],
+      "extra_features": [],
+      "run_kwargs": {}
+    },
+    "hidden8": {
+      "_note": "Capacity ablation (section 6): HIDDEN_DIM=8 vs standing 16. No effect, even per-class.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "hidden8",
+      "run_kwargs": {"hidden_dim": 8}
+    },
+    "hidden32": {
+      "_note": "Capacity ablation (section 6): HIDDEN_DIM=32 vs standing 16. No effect, even per-class.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "hidden32",
+      "run_kwargs": {"hidden_dim": 32}
+    },
+    "hidden64": {
+      "_note": "Capacity ablation (section 6): HIDDEN_DIM=64 vs standing 16. No effect, even per-class.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "hidden64",
+      "run_kwargs": {"hidden_dim": 64}
+    }
+  }
+}

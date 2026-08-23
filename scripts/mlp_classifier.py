@@ -125,6 +125,7 @@ def train_mlp(
     batch_size: int | None = BATCH_SIZE,
     lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE,
+    hidden_dim: int = HIDDEN_DIM,
 ):
     """Trains the MLP with Adam, class-count-weighted cross-entropy. `classes` (default
     MLP_CLASSES) is the class list y_train/y_val's integer labels index into."""
@@ -141,7 +142,7 @@ def train_mlp(
     X_val_t = torch.tensor(X_val, device=DEVICE)
     y_val_t = torch.tensor(y_val, device=DEVICE)
 
-    model = MLP(input_dim=X_train.shape[1], num_classes=len(classes)).to(DEVICE)
+    model = MLP(input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
@@ -198,6 +199,7 @@ def evaluate_val_metrics(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    hidden_dim: int = HIDDEN_DIM,
 ):
     """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
     model in `output_dir` - never retrains, only loads. `classes` (default MLP_CLASSES) must
@@ -222,7 +224,7 @@ def evaluate_val_metrics(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits
     )
 
-    model = MLP(input_dim=X_val.shape[1], num_classes=len(classes)).to(DEVICE)
+    model = MLP(input_dim=X_val.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
     model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
     model.eval()
     with torch.no_grad():
@@ -311,6 +313,7 @@ def run_training(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    hidden_dim: int = HIDDEN_DIM,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
@@ -318,12 +321,13 @@ def run_training(
     mlp_variants.py); `features`/`extra_features` (see prepare_split_features) let a caller swap
     the feature set instead, e.g. binning range_sc in place of doppler_spread; `splits` lets a
     caller evaluate a different candidate split instead of the standing fixed one (see
-    sequence_split.select_best_split). Writes to `output_dir` (default MLP_DIR) - pass a different
-    directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a run's cache separate from the default
-    baseline instead of overwriting it. Returns (model, history, X_test, y_test) - X_test/y_test
-    are returned but NOT evaluated here; call evaluate_test explicitly once."""
+    sequence_split.select_best_split); `hidden_dim` lets a caller change model capacity. Writes to
+    `output_dir` (default MLP_DIR) - pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}")
+    to keep a run's cache separate from the default baseline instead of overwriting it. Returns
+    (model, history, X_test, y_test) - X_test/y_test are returned but NOT evaluated here; call
+    evaluate_test explicitly once."""
     cache_key = {
-        "n_bins": N_BINS, "hidden_dim": HIDDEN_DIM, "epochs": epochs, "batch_size": batch_size,
+        "n_bins": N_BINS, "hidden_dim": hidden_dim, "epochs": epochs, "batch_size": batch_size,
         "lr": lr, "random_state": random_state,
     }
     history_cache = output_dir / HISTORY_FILENAME
@@ -337,14 +341,15 @@ def run_training(
         cached = json.loads(history_cache.read_text())
         if cached.get("key") == cache_key:
             print(f"{history_cache} already matches this config, loading cached model + history")
-            model = MLP(input_dim=X_train.shape[1], num_classes=len(classes)).to(DEVICE)
+            model = MLP(input_dim=X_train.shape[1], hidden_dim=hidden_dim, num_classes=len(classes)).to(DEVICE)
             model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
             plot_training_curves(cached["history"], output_dir=output_dir)
             return model, cached["history"], X_test, y_test
         print(f"{history_cache} doesn't match this config, retraining")
 
     model, history = train_mlp(
-        X_train, y_train, X_val, y_val, classes=classes, epochs=epochs, batch_size=batch_size, lr=lr, random_state=random_state
+        X_train, y_train, X_val, y_val, classes=classes, epochs=epochs, batch_size=batch_size, lr=lr,
+        random_state=random_state, hidden_dim=hidden_dim,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -24,6 +24,7 @@ results/             generated plots + cached tables (gitignored, recreated by r
 data/                the RadarScenes dataset (gitignored)
 Design_Decisions.md               taxonomy/encoding/split decisions and the evidence behind them
 MLP_Decisions_and_Findings.md     MLP architecture, hyperparameters, and findings, and the reasoning behind them
+MLP_CONFIG.json                   every trained MLP variant's config, loaded by scripts/mlp_variants.py
 visualize.sh          rad_viewer launcher
 ```
 
@@ -161,17 +162,24 @@ class taxonomy or hyperparameter config without touching the standing baseline's
 python3 scripts/mlp_classifier.py   # trains (or loads from cache) and writes to results/mlp/
 ```
 
-## `scripts/mlp_variants.py` / `scripts/class_taxonomy_experiment.py`
+## `MLP_CONFIG.json` / `scripts/mlp_variants.py` / `scripts/class_taxonomy_experiment.py`
 
-`mlp_variants.py` is the single source of truth for every trained MLP variant produced so far
-(`baseline`, `bus_separate`, `epochs_1000`, `truck_separate`) — each entry in `MLP_VARIANTS` maps
-a name to its `classes`/`class_groups`/`output_dir`/hyperparameter overrides, so running or
-loading one is `run_variant(raw_df, "bus_separate")` instead of hand assembling those per call.
-`baseline` (bus merged into large_vehicle) is the standing model and mlp_classifier.py's own
-default; `bus_separate` is the original, pre-merge taxonomy, kept for reference.
-`class_taxonomy_experiment.py` is the ablation that led to that merge decision: does keeping
-`bus` separate actually help the downstream MLP, versus merging it in, or splitting `truck`
-back out instead? See `MLP_Decisions_and_Findings.md` section 4 for the results.
+`MLP_CONFIG.json` (project root) is the single source of truth for every trained MLP variant
+produced so far (`baseline`, `bus_separate`, `epochs_1000`, `truck_separate`, `bs32`, `range_sc`,
+`hidden8`/`hidden32`/`hidden64`) — a data-only registry, each entry a `classes` list, a
+`class_groups_base` (`CLASS_GROUPS` or `MLP_CLASS_GROUPS`, referenced by name, never duplicated,
+so the real taxonomy mapping in `dataloader.py` stays the only source of truth) plus optional
+`class_groups_overrides`, an `output_dir` (relative to `results/mlp/`, `null` for the standing
+baseline), and optional `features`/`extra_features`/`run_kwargs` overrides. JSON has no comment
+syntax, so `_comment`/`_note` keys are plain notes, ignored by the loader. `scripts/mlp_variants.py`
+loads and resolves this file into `MLP_VARIANTS` at import time (merging each `class_groups_base`
+with its overrides, joining `output_dir` onto `MLP_DIR`), so running or loading a variant is
+`run_variant(raw_df, "bus_separate")` instead of hand assembling those per call. `baseline` (bus
+merged into large_vehicle) is the standing model and `mlp_classifier.py`'s own default;
+`bus_separate` is the original, pre-merge taxonomy, kept for reference. `class_taxonomy_experiment.py`
+is the ablation that led to that merge decision: does keeping `bus` separate actually help the
+downstream MLP, versus merging it in, or splitting `truck` back out instead? See
+`MLP_Decisions_and_Findings.md` section 4 for the results.
 
 ```bash
 python3 scripts/mlp_variants.py <variant>              # defaults to "baseline"
