@@ -98,6 +98,14 @@
       "features": ["rcs", "vr_compensated"],
       "extra_features": ["doppler_spread", "spatial_extent"],
       "run_kwargs": {}
+    },
+    "azimuth_extent": {
+      "_note": "Feature design test (section 9): baseline plus one extra scalar, azimuth_extent (instance's angular spread as seen by the sensor, max-min of azimuth_sc). Different physical quantity than spatial_extent: a fixed-size object further away subtends a smaller angle, so this folds in range-dependent apparent size rather than raw Euclidean spread. azimuth_sc was untried until now, every other point-level column (rcs, vr, vr_compensated, x_cc, y_cc, range_sc) already had a feature built from it.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "azimuth_extent",
+      "extra_features": ["doppler_spread", "azimuth_extent"],
+      "run_kwargs": {}
     }
   }
 }

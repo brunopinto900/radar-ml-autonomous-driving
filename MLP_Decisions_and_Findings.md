@@ -108,6 +108,16 @@ Macro F1: `baseline` 0.686, `n_points` 0.692, `raw_counts` 0.690. Both deltas, a
 
 **Finding:** not a real improvement, by either route. Two independent mechanisms for handing the network point count converge on the same null result, stronger evidence than either alone that point count isn't the missing piece, or that the true effect is smaller than this dataset's split noise can resolve.
 
+## 9. Feature design: orientation and angular features (spatial_extent, azimuth_extent)
+
+`x_rel`/`y_rel` are per-point and orientation-dependent (a car seen broadside vs head-on spreads very differently across the two axes for the same physical object). Two tests: `spatial_extent` drops them in favor of one orientation-robust scalar per instance (bounding-box diagonal, `sqrt(x_extent^2+y_extent^2)`), appended unbinned; `azimuth_extent` adds a new scalar on top of `baseline` instead (angular spread as seen by the sensor, max-min of `azimuth_sc`, a point-level column nothing had used until now). `scripts/mlp_variants.py`'s `spatial_extent`/`azimuth_extent`, results at `results/mlp/spatial_extent/`, `results/mlp/azimuth_extent/`.
+
+Macro F1: `baseline` 0.686, `spatial_extent` 0.690, `azimuth_extent` 0.696. Every per-class delta sits inside the split-choice noise floor (section 5); `azimuth_extent`'s `two_wheeler` delta (+0.023) is the largest of any feature-design test so far, still a fraction of that class's 0.386 noise spread.
+
+Also checked whether `spatial_extent`'s own split-choice noise floor is narrower than baseline's, since it was specifically built to remove the orientation-sensitivity mechanism thought to drive part of that noise (see Key takeaways). It isn't, meaningfully: macro F1 across the same 6 splits ranged 0.655-0.745 (std 0.030) vs baseline's 0.651-0.734 (std 0.027), essentially unchanged. Per-class, `large_vehicle` and `two_wheeler`, the classes an orientation fix would most plausibly help, shrank a little (0.197->0.167, 0.386->0.356) but not enough to matter; `car`/`pedestrian`/`pedestrian_group` were flat. Script: `scripts/split_sensitivity.py`'s `features`/`extra_features`/`output_subdir` params (generalized for this check), results at `results/mlp/split_search_spatial_extent/fold_<n>/`.
+
+**Finding:** sixth independent axis (capacity, depth, `n_points`, `raw_counts`, `spatial_extent`, `azimuth_extent`) landing inside the noise floor, both on the fixed baseline split and, for `spatial_extent`, across the noise floor itself. Reinforces that the ceiling isn't from any one specific feature-engineering choice, it's more fundamental to what this per-instance summary vector can express at ~2.9 points/instance average.
+
 ## Key takeaways
 
 **Never compare metrics across two different splits, even both stratified by class proportion.** Section 5's `range_sc` cross check is the concrete example: comparing this project's fixed split against an independently built one swung `large_vehicle`'s recall by 20+ points and its dominant confusion (`large_vehicle -> car`) by 3x, with nothing about the model or features changing. A number sourced from outside this project's fixed split (`sequence_split.py`) isn't a caveat away from being comparable, it's a different measurement.
