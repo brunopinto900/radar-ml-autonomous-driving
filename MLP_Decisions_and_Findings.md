@@ -122,23 +122,29 @@ Also checked whether `spatial_extent`'s own split-choice noise floor is narrower
 
 Sections 6-9 tested whether handing the network more information helps (six null results). This asks a more direct question: sliced the *existing* `baseline` model's val predictions by instance point count, no retraining, to check whether error is actually concentrated in sparse instances. `mlp_classifier.evaluate_by_point_count`, reproducible (loads the cached model, never retrains).
 
+Delta columns are relative to the sparsest bucket (`n_points=1`), via `mlp_classifier.format_point_count_deltas`:
+
 | points | n | accuracy | macro F1 | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group |
 |---|---|---|---|---|---|---|---|---|
 | 1 | 24,004 | 0.619 | 0.381 | 0.839 | 0.037 | 0.389 | 0.641 | 0.000 |
-| 2 | 17,353 | 0.741 | 0.606 | 0.856 | 0.237 | 0.516 | 0.747 | 0.673 |
-| 3 | 11,711 | 0.800 | 0.702 | 0.881 | 0.471 | 0.597 | 0.770 | 0.791 |
-| 4 | 6,567 | 0.821 | 0.762 | 0.878 | 0.687 | 0.652 | 0.768 | 0.823 |
-| 5 | 3,507 | 0.815 | 0.764 | 0.847 | 0.833 | 0.658 | 0.652 | 0.830 |
-| 6-10 | 6,348 | 0.854 | 0.715 | 0.798 | 0.963 | 0.525 | 0.476 | 0.813 |
-| 11+ | 1,624 | 0.929 | 0.538 | 0.822 | 0.995 | 0.211 | 0.000 | 0.660 |
+| 2 | 17,353 | 0.741 (+0.122) | 0.606 (+0.224) | 0.856 (+0.017) | 0.237 (+0.200) | 0.516 (+0.127) | 0.747 (+0.105) | 0.673 (+0.673) |
+| 3 | 11,711 | 0.800 (+0.181) | 0.702 (+0.321) | 0.881 (+0.042) | 0.471 (+0.433) | 0.597 (+0.208) | 0.770 (+0.129) | 0.791 (+0.791) |
+| 4 | 6,567 | 0.821 (+0.202) | 0.762 (+0.380) | 0.878 (+0.039) | 0.687 (+0.650) | 0.652 (+0.263) | 0.768 (+0.127) | 0.823 (+0.823) |
+| 5 | 3,507 | 0.815 (+0.196) | 0.764 (+0.383) | 0.847 (+0.008) | 0.833 (+0.796) | 0.658 (+0.270) | 0.652 (+0.010) | 0.830 (+0.830) |
+| 6-10 | 6,348 | 0.854 (+0.236) | 0.715 (+0.334) | 0.798 (-0.041) | 0.963 (+0.926) | 0.525 (+0.136) | 0.476 (-0.165) | 0.813 (+0.813) |
+| 11+ | 1,624 | 0.929 (+0.310) | 0.538 (+0.156) | 0.822 (-0.017) | 0.995 (+0.958) | 0.211 (-0.178) | 0.000 (-0.641) | 0.660 (+0.660) |
+
+![Val performance by instance point count](results/mlp/mlp_point_count_curve.png)
 
 A quarter of val (24,004/~71k) is single-point instances, where the model is barely better than chance in macro-F1 terms. Macro F1 roughly doubles from 1 to 5 points (0.381 -> 0.764), same trained model throughout.
 
-`large_vehicle` is the clearest case: f1 climbs almost monotonically, 0.037 (1 point) to 0.995 (11+ points). Being `large_vehicle` is a question about size, structurally unknowable from a single point, and nearly perfect once there's enough support to gauge extent. `car` is the opposite pattern, flat and high throughout (0.80-0.88), a strong enough single-point signal (RCS/Doppler) that extra points barely matter. `two_wheeler`, `pedestrian`, `pedestrian_group` rise then fall, peaking around 3-5 points before declining at 6-10 and 11+, at least partly a support/class-mix artifact rather than a real reversal: those tail buckets shift heavily toward `large_vehicle` (42% and 75% of the bucket respectively), and `pedestrian` hitting exactly 0.000 at 11+ almost certainly reflects near-zero real pedestrian instances at that point count, not a genuine effect.
+`large_vehicle` is the clearest case: f1 climbs almost monotonically, 0.037 (1 point) to 0.995 (11+ points). Being `large_vehicle` is a question about size, structurally unknowable from a single point, and nearly perfect once there's enough support to gauge extent (real, substantial support behind that climb: median 7 points/instance, 62% of val `large_vehicle` instances have 6+ points). `car` is the opposite pattern, flat and high throughout (0.80-0.88), a strong enough single-point signal (RCS/Doppler) that extra points barely matter, and consistent with that, only 6% of `car` instances ever reach 6+ points, so the class rarely gets the chance to lean on spatial spread in the first place.
+
+`two_wheeler`, `pedestrian`, `pedestrian_group` rise then fall, peaking around 3-5 points before declining at 6-10 and 11+. `evaluate_by_point_count` now also reports per-class `support_<class>` (true instance count per bucket, added specifically to make this legible from the table itself), which confirms the drop is a support/class-mix artifact, not a real reversal: `two_wheeler` support falls from 1,391 (bucket 1) to 242 (6-10) to 4 (11+); `pedestrian` falls from 6,318 to 49 to 0. `f1_pedestrian=0.000` at 11+ isn't the model failing at high point counts, there are zero real pedestrian instances there to evaluate. `two_wheeler` at 11+ (4 instances) is a coin flip, not a measurement. Those tail buckets shift heavily toward `large_vehicle` instead (42% and 75% of the bucket by instance count).
 
 Reconciling with section 8's null result: that tested whether *telling* the network an instance's point count (as an input feature) helps, it doesn't. This tests something different, whether instances that structurally *have* more real points get classified better, and they clearly do. A count scalar doesn't add information the network can act on; more real points populating the histogram does. That distinction is the whole point.
 
-**Finding:** sparsity is a real, large, and now directly demonstrated driver of the ceiling, not just an inference from six null feature-design results. It doesn't act uniformly: it dominates `large_vehicle` (a size question, structurally unanswerable from 1-2 points) far more than `car`. First evidence in this project that a change to what data goes in, rather than how it's summarized, could plausibly move the needle, consistent with the track-aggregation direction in Key takeaways below.
+**Finding:** sparsity is a real, large, and now directly demonstrated driver of the ceiling for classes with enough range of point counts to show it, `large_vehicle` above all (a size question, structurally unanswerable from 1-2 points, and median 7 points/instance to actually demonstrate the effect). It doesn't act uniformly: `car` never needed the points (RCS/Doppler alone already separates it at n=1), and `two_wheeler`/`pedestrian` simply don't have enough high-point instances in RadarScenes to say anything about how they'd behave with more, the apparent drop at 6-10/11+ is near-zero support, not degraded classification. First evidence in this project that a change to what data goes in, rather than how it's summarized, could plausibly move the needle, consistent with the track-aggregation direction in Key takeaways below.
 
 ## Key takeaways
 

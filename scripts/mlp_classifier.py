@@ -39,6 +39,7 @@ CURVES_FILENAME = "mlp_training_curves.png"
 VAL_METRICS_FILENAME = "mlp_val_metrics.json"
 CONFUSION_MATRIX_FILENAME = "mlp_confusion_matrix.png"
 METRICS_BAR_FILENAME = "mlp_precision_recall_f1.png"
+POINT_COUNT_CURVE_FILENAME = "mlp_point_count_curve.png"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -333,7 +334,10 @@ def evaluate_by_point_count(
     bins: tuple[int, ...] = (1, 2, 3, 4, 5, 10, 999),
 ) -> pd.DataFrame:
     """Buckets val predictions from the cached model in `output_dir` by instance point count
-    (n_points) and reports per-bucket support, accuracy, macro F1, and per-class F1. Answers a
+    (n_points) and reports per-bucket support, accuracy, macro F1, and per-class F1 + support
+    (support_<class> is that class's true instance count within the bucket, not a prediction
+    count - it's what makes a per-class F1 like `f1_pedestrian=0.000` at the sparsest/densest
+    buckets legible as "zero real instances there" rather than "the model failed"). Answers a
     different question than the n_points/raw_counts feature tests (section 8): those asked
     whether handing the network point count as an input helps; this asks whether point count
     itself, independent of any feature, explains why error is high - i.e. is sparsity a real
@@ -347,7 +351,7 @@ def evaluate_by_point_count(
     from the model's input columns afterward - unless the variant being evaluated already trains
     on n_points (e.g. the `n_points` variant itself), in which case it's already a real input
     column and stays one; only the freshly-appended copy is stripped."""
-    from sklearn.metrics import f1_score
+    from sklearn.metrics import f1_score, precision_recall_fscore_support
 
     model_cache = output_dir / MODEL_FILENAME
     if not model_cache.exists():
@@ -385,13 +389,65 @@ def evaluate_by_point_count(
         if n:
             row["accuracy"] = (y_pred[mask] == y_val[mask]).mean()
             row["macro_f1"] = f1_score(y_val[mask], y_pred[mask], labels=range(len(classes)), average="macro", zero_division=0)
-            per_class = f1_score(y_val[mask], y_pred[mask], labels=range(len(classes)), average=None, zero_division=0)
-            row.update({f"f1_{cls}": v for cls, v in zip(classes, per_class)})
+            _, _, per_class_f1, per_class_support = precision_recall_fscore_support(
+                y_val[mask], y_pred[mask], labels=range(len(classes)), zero_division=0
+            )
+            row.update({f"f1_{cls}": v for cls, v in zip(classes, per_class_f1)})
+            row.update({f"support_{cls}": int(v) for cls, v in zip(classes, per_class_support)})
         rows.append(row)
 
     summary = pd.DataFrame(rows).set_index("bucket")
     print(summary.round(3).to_string())
     return summary
+
+
+def format_point_count_deltas(summary: pd.DataFrame) -> pd.DataFrame:
+    """Reformats evaluate_by_point_count's summary for a table where the reader cares how much
+    each metric moves off the sparsest bucket, not just its raw value: every value except the
+    first bucket (n_points=1, the baseline row) is shown as "value (+/-delta)", delta always
+    relative to that first bucket. `n` and `support_<class>` (sample sizes) are left as plain
+    integers, they're counts, not quality metrics that should carry a delta."""
+    plain_cols = [c for c in summary.columns if c == "n" or c.startswith("support_")]
+    value_cols = [c for c in summary.columns if c not in plain_cols]
+    baseline = summary.iloc[0]
+    out = summary[plain_cols].copy()
+    for col in value_cols:
+        cells = [f"{summary[col].iloc[0]:.3f}"]
+        for v in summary[col].iloc[1:]:
+            delta = v - baseline[col]
+            sign = "+" if delta >= 0 else ""
+            cells.append(f"{v:.3f} ({sign}{delta:.3f})")
+        out[col] = cells
+    return out
+
+
+def plot_point_count_curve(summary: pd.DataFrame, classes: list[str] = MLP_CLASSES, output_dir=MLP_DIR):
+    """Plots evaluate_by_point_count's summary as one curve per class (accuracy and macro F1
+    included as dashed reference lines), point count bucket on the x-axis - overlaying every class
+    on one plot reads faster than the raw table, especially for spotting which classes rise/fall
+    together vs which stay flat."""
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = range(len(summary))
+    ax.plot(x, summary["accuracy"], label="accuracy", color="0.5", linestyle="--", marker="o")
+    ax.plot(x, summary["macro_f1"], label="macro F1", color="k", linestyle="--", marker="o")
+    for cls in classes:
+        ax.plot(x, summary[f"f1_{cls}"], label=cls, marker="o")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(summary.index)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("instance point count (bucket)")
+    ax.set_ylabel("score")
+    ax.set_title("MLP - val performance by instance point count")
+    ax.legend(loc="center right", fontsize=8)
+    fig.tight_layout()
+
+    path = output_dir / POINT_COUNT_CURVE_FILENAME
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150)
+    print(f"Saved {path}")
+    return fig
 
 
 def plot_training_curves(history: list[dict], output_dir=MLP_DIR):
