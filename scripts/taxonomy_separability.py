@@ -21,7 +21,12 @@ DOPPLER_SPREAD_CACHE = RESULTS_DIR / "data" / "doppler_spread_cache.parquet"
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add x_rel/y_rel (point position relative to its instance's centroid, mean-centered),
     n_points (instance's raw point count, broadcast to every one of its rows - cheap groupby
-    size, no caching needed unlike doppler_spread below), and doppler_spread (per-instance
+    size, no caching needed unlike doppler_spread below), spatial_extent (instance's bounding-box
+    diagonal, sqrt(x_extent^2 + y_extent^2) where extent is max-min per axis - unlike x_rel/y_rel,
+    which are per-point and orientation-dependent (a car seen broadside vs head-on spreads very
+    differently across the x/y axes even though it's the same physical object), this is one
+    orientation-robust scalar per instance: rotating the point cloud changes x_extent/y_extent
+    individually but their combined diagonal is far more stable), and doppler_spread (per-instance
     median absolute deviation of vr_compensated). doppler_spread is the expensive part (~2-3 min
     at full scale, one Python lambda per instance group), so it's cached to disk keyed by
     sequence_name and reused if the cache covers the same sequences - same skip-if-covered
@@ -31,6 +36,9 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     df["x_rel"] = df["x_cc"] - group["x_cc"].transform("mean")
     df["y_rel"] = df["y_cc"] - group["y_cc"].transform("mean")
     df["n_points"] = group["x_cc"].transform("size")
+    x_extent = group["x_cc"].transform(lambda s: s.max() - s.min())
+    y_extent = group["y_cc"].transform(lambda s: s.max() - s.min())
+    df["spatial_extent"] = (x_extent**2 + y_extent**2) ** 0.5
 
     sequences = set(df["sequence_name"].unique())
     if DOPPLER_SPREAD_CACHE.exists():

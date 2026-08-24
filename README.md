@@ -208,9 +208,13 @@ python3 scripts/split_sensitivity.py
 train/val/test split, and runs the taxonomy separability probe (single-fold and 5-fold CV),
 interleaved with written findings and the decision 1 resolution. `feature_distributions.ipynb`
 runs the per-feature percentile table and bin-count sweep (single-fold and 5-fold CV), with the
-decision 3 resolution. `mlp_classifier.ipynb` builds features, trains (cached) the baseline MLP,
-and reports its validation metrics, confusion matrix, and per-class precision/recall/f1 —
-interleaved with the `MLP_Decisions_and_Findings.md` decisions and findings.
+decision 3 resolution. `mlp_classifier.ipynb` covers the foundational, settled MLP decisions:
+builds features, resolves the class taxonomy, trains (cached) the baseline model, and reports its
+validation metrics, confusion matrix, and per-class precision/recall/f1. `mlp_ablations.ipynb`
+holds the open-ended ablation program that keeps testing whether anything beats that baseline,
+batch size recheck, feature swaps, architecture capacity/depth, feature design, and the
+split-choice noise floor every comparison there is judged against. Both interleaved with the
+`MLP_Decisions_and_Findings.md` decisions and findings.
 
 ## `visualize.sh`
 

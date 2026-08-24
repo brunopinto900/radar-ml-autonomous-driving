@@ -89,6 +89,15 @@
       "output_dir": "raw_counts",
       "normalize": false,
       "run_kwargs": {}
+    },
+    "spatial_extent": {
+      "_note": "Feature design test (section 9): drops x_rel/y_rel (per-point, orientation-dependent - a car seen broadside vs head-on spreads very differently across the two axes for the same physical object) in favor of spatial_extent, one orientation-robust scalar per instance (bounding-box diagonal, sqrt(x_extent^2+y_extent^2)), appended unbinned like doppler_spread. Same underlying concept (how big/spread-out is this instance's footprint), independent of aspect angle.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "spatial_extent",
+      "features": ["rcs", "vr_compensated"],
+      "extra_features": ["doppler_spread", "spatial_extent"],
+      "run_kwargs": {}
     }
   }
 }
