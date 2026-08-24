@@ -30,7 +30,7 @@ def _load_variants() -> dict:
             "output_dir": output_dir,
             "run_kwargs": entry.get("run_kwargs", {}),
         }
-        for optional_key in ("features", "extra_features"):
+        for optional_key in ("features", "extra_features", "normalize"):
             if optional_key in entry:
                 config[optional_key] = entry[optional_key]
         variants[name] = config
@@ -51,16 +51,19 @@ def build_variant_df(raw_df, variant: str):
 
 def run_variant(raw_df, variant: str):
     """Trains (or loads from cache) and evaluates val metrics for the named variant. See
-    MLP_CONFIG.json for what's available. A variant may optionally set "features"/"extra_features"
-    to swap the feature set instead of (or alongside) the taxonomy/hyperparameters - falls back
-    to mlp_classifier.py's own defaults (POINT_LEVEL_FEATURES / doppler_spread) if absent.
-    Architecture kwargs ("hidden_dim"/"n_hidden_layers"/"dropout"), if set in "run_kwargs", also
-    have to reach evaluate_val_metrics (not just run_training), since reloading the cached model
-    needs to reconstruct the exact same architecture ("weight_decay" is optimizer-only, doesn't
-    affect architecture, so it's excluded). Returns (model, history, metrics_df, cm_fig, bar_fig)."""
+    MLP_CONFIG.json for what's available. A variant may optionally set "features"/"extra_features"/
+    "normalize" to swap the feature set or encoding instead of (or alongside) the
+    taxonomy/hyperparameters - falls back to mlp_classifier.py's own defaults
+    (POINT_LEVEL_FEATURES / doppler_spread / fraction-normalized bins) if absent. These reach both
+    run_training and evaluate_val_metrics, since evaluating a cached model on features built a
+    different way than it was trained on would silently produce garbage. Architecture kwargs
+    ("hidden_dim"/"n_hidden_layers"/"dropout"/"batch_norm"), if set in "run_kwargs", also have to
+    reach evaluate_val_metrics (not just run_training), since reloading the cached model needs to
+    reconstruct the exact same architecture ("weight_decay" is optimizer-only, doesn't affect
+    architecture, so it's excluded). Returns (model, history, metrics_df, cm_fig, bar_fig)."""
     config = MLP_VARIANTS[variant]
     df = build_variant_df(raw_df, variant)
-    feature_kwargs = {k: config[k] for k in ("features", "extra_features") if k in config}
+    feature_kwargs = {k: config[k] for k in ("features", "extra_features", "normalize") if k in config}
     arch_kwargs = {
         k: config["run_kwargs"][k]
         for k in ("hidden_dim", "n_hidden_layers", "dropout", "batch_norm")

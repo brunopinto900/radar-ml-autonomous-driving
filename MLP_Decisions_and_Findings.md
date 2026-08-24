@@ -100,6 +100,14 @@ Retrained result: macro F1 0.709 vs `baseline`'s 0.686 (delta +0.023). Looks lik
 
 **Open, not acted on:** the 64 histogram-bin features are all bounded [0,1], but `doppler_spread` is unnormalized (train range 0-59.2, mean 0.233), a scale mismatch at the input layer. Adam's per-parameter step size, and for `deep10`, BatchNorm sitting right after the first layer, both blunt this, which is likely why it hasn't visibly broken anything, but it hasn't been tested directly (e.g. z-score standardizing `doppler_spread` on train stats).
 
+## 8. Feature design: point count (n_points scalar vs raw-count histogram)
+
+Histogram features are fraction-of-points-per-bin, which discards instance point count entirely (a 1-point and an N-point instance landing in the same bin are indistinguishable). Two ways of putting it back: `n_points` (baseline plus one extra scalar, raw instance point count appended unbinned) and `raw_counts` (baseline with `normalize=false`, unnormalized per-bin counts, so point count is recoverable by summing a feature's bins). `scripts/mlp_variants.py`'s `n_points`/`raw_counts`, results at `results/mlp/n_points/`, `results/mlp/raw_counts/`.
+
+Macro F1: `baseline` 0.686, `n_points` 0.692, `raw_counts` 0.690. Both deltas, and every per-class delta, sit inside the split-choice noise floor (section 5). Both nudge the `pedestrian`/`pedestrian_group` precision/recall balance in the theoretically expected direction (`pedestrian` recall down from 0.944, `pedestrian_group` recall up from 0.544), but neither shift clears noise either.
+
+**Finding:** not a real improvement, by either route. Two independent mechanisms for handing the network point count converge on the same null result, stronger evidence than either alone that point count isn't the missing piece, or that the true effect is smaller than this dataset's split noise can resolve.
+
 ## Key takeaways
 
 **Never compare metrics across two different splits, even both stratified by class proportion.** Section 5's `range_sc` cross check is the concrete example: comparing this project's fixed split against an independently built one swung `large_vehicle`'s recall by 20+ points and its dominant confusion (`large_vehicle -> car`) by 3x, with nothing about the model or features changing. A number sourced from outside this project's fixed split (`sequence_split.py`) isn't a caveat away from being comparable, it's a different measurement.

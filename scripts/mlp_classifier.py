@@ -95,6 +95,7 @@ def prepare_split_features(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    normalize: bool = True,
 ):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
     edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
@@ -102,12 +103,15 @@ def prepare_split_features(
     POINT_LEVEL_FEATURES) are binned into `n_bins` columns each; `extra_features` (default
     doppler_spread) are appended unbinned - a caller can swap doppler_spread for another
     point-level feature by moving it into `features` and passing extra_features=[] instead (see
-    mlp_variants.py's "range_sc" variant). `splits` (default None) uses the project's standing
-    fixed split (load_split()) - pass an explicit {"train"/"val"/"test": [sequence_name, ...]}
-    dict instead to evaluate a different candidate split (see sequence_split.select_best_split),
-    without touching the standing one. Returns
-    (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X float32,
-    y integer class indices in `classes` order."""
+    mlp_variants.py's "range_sc" variant). `normalize` (default True) controls whether each
+    feature's bins hold the fraction of the instance's points landing there (the default) or raw
+    counts (see histogram_separability.build_histogram_features) - raw counts embed point count
+    back into the encoding implicitly, at the cost of putting sparse/busy instances on different
+    scales. `splits` (default None) uses the project's standing fixed split (load_split()) - pass
+    an explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to evaluate a different
+    candidate split (see sequence_split.select_best_split), without touching the standing one.
+    Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X
+    float32, y integer class indices in `classes` order."""
     class_to_idx = {cls: i for i, cls in enumerate(classes)}
     if splits is None:
         splits = load_split()
@@ -120,7 +124,7 @@ def prepare_split_features(
 
     def to_xy(split_df):
         hist = build_histogram_features(
-            split_df, n_bins, classes, features, edges=edges, extra_features=extra_features
+            split_df, n_bins, classes, features, edges=edges, extra_features=extra_features, normalize=normalize
         )
         feature_cols = [c for c in hist.columns if c not in ("sequence_name", "group")]
         X = hist[feature_cols].to_numpy(dtype="float32")
@@ -226,6 +230,7 @@ def evaluate_val_metrics(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    normalize: bool = True,
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -257,7 +262,8 @@ def evaluate_val_metrics(
         raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
 
     _, _, X_val, y_val, _, _, _ = prepare_split_features(
-        df, classes=classes, features=features, extra_features=extra_features, splits=splits
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits,
+        normalize=normalize,
     )
 
     model = MLP(
@@ -352,6 +358,7 @@ def run_training(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    normalize: bool = True,
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -361,9 +368,10 @@ def run_training(
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
     caller train on a different class taxonomy against the same fixed split (see
-    mlp_variants.py); `features`/`extra_features` (see prepare_split_features) let a caller swap
-    the feature set instead, e.g. binning range_sc in place of doppler_spread; `splits` lets a
-    caller evaluate a different candidate split instead of the standing fixed one (see
+    mlp_variants.py); `features`/`extra_features`/`normalize` (see prepare_split_features) let a
+    caller swap the feature set or encoding instead, e.g. binning range_sc in place of
+    doppler_spread, or raw per-bin counts instead of fractions; `splits` lets a caller evaluate a
+    different candidate split instead of the standing fixed one (see
     sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers` let a caller change model
     capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add regularization/stabilization
     (default 0.0/0.0/False, off, reproducing the original baseline). Writes to `output_dir`
@@ -380,7 +388,8 @@ def run_training(
     model_cache = output_dir / MODEL_FILENAME
 
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(
-        df, classes=classes, features=features, extra_features=extra_features, splits=splits
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits,
+        normalize=normalize,
     )
 
     if history_cache.exists() and model_cache.exists():

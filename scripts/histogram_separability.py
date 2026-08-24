@@ -37,15 +37,22 @@ def build_histogram_features(
     features: list[str] = POINT_LEVEL_FEATURES,
     edges: dict[str, np.ndarray] | None = None,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    normalize: bool = True,
 ) -> pd.DataFrame:
-    """One row per instance: each point-level feature becomes n_bins columns holding the
-    fraction of that instance's own points landing in each bin - fraction, not raw count, so a
-    busy instance's histogram encodes distribution shape rather than just point count. `edges`
-    (see fit_bin_edges), if given, are used as-is instead of being recomputed from `df` - needed
-    to encode val/test with edges fit on train only. Otherwise edges are fit from `df` itself
-    (fine when df is the only/whole pool being encoded, e.g. the CV probes). `extra_features`
-    (default doppler_spread) are appended unbinned, since they're already one value per
-    instance - pass [] to skip (e.g. a feature-swap variant that bins everything)."""
+    """One row per instance: each point-level feature becomes n_bins columns holding, by
+    default (`normalize=True`), the fraction of that instance's own points landing in each bin -
+    fraction, not raw count, so a busy instance's histogram encodes distribution shape rather
+    than just point count. That normalization is exactly what makes point count irrecoverable
+    from the encoding (a 1-point and an N-point instance landing in the same bin are
+    indistinguishable) - `normalize=False` skips it and leaves raw per-bin counts, which
+    embeds point count back in implicitly (the bins for one feature sum to that instance's
+    n_points) at the cost of putting sparse and busy instances on different numeric scales for
+    the same underlying shape. `edges` (see fit_bin_edges), if given, are used as-is instead of
+    being recomputed from `df` - needed to encode val/test with edges fit on train only.
+    Otherwise edges are fit from `df` itself (fine when df is the only/whole pool being encoded,
+    e.g. the CV probes). `extra_features` (default doppler_spread) are appended unbinned, since
+    they're already one value per instance - pass [] to skip (e.g. a feature-swap variant that
+    bins everything)."""
     df = df.loc[df["group"].isin(classes)]
     if edges is None:
         edges = fit_bin_edges(df, n_bins, features)
@@ -62,8 +69,10 @@ def build_histogram_features(
             .reindex(columns=range(n_bins), fill_value=0)
         )
         counts.columns = [f"{feature}_bin{i}" for i in range(n_bins)]
-        row_sums = counts.sum(axis=1)
-        hist_frames.append(counts.div(row_sums.where(row_sums > 0, 1), axis=0))
+        if normalize:
+            row_sums = counts.sum(axis=1)
+            counts = counts.div(row_sums.where(row_sums > 0, 1), axis=0)
+        hist_frames.append(counts)
 
     features_df = pd.concat(hist_frames, axis=1)
     extra = df.drop_duplicates(INSTANCE_COLS).set_index(INSTANCE_COLS, drop=False)
