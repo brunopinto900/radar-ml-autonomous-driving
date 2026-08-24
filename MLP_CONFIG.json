@@ -106,6 +106,36 @@
       "output_dir": "azimuth_extent",
       "extra_features": ["doppler_spread", "azimuth_extent"],
       "run_kwargs": {}
+    },
+    "stat_descriptors": {
+      "_note": "Feature design test (section 11): replaces the 65-dim histogram encoding entirely with 8 explicit per-instance statistics. rcs gets mean/median/std (mean/median for central tendency - car's f1=0.839 at n=1 comes almost entirely from the raw RCS value, a std-only encoding would lose that; std because unlike vr_compensated there's no existing rcs-spread feature, so no redundancy risk, and a rigid multi-reflector object like a car plausibly has higher point-to-point RCS variance than a soft scatterer like a pedestrian). vr_compensated gets mean/median only, std deliberately omitted since doppler_spread (MAD of vr_compensated, already in the feature set) already covers that ground. radial (new: sqrt(x_rel^2+y_rel^2), per-point Euclidean distance from the instance's own centroid) gets std, exactly rotation-invariant (trace of the instance's 2D covariance matrix), unlike x_rel/y_rel individually. azimuth_sc gets std (a softer version of azimuth_extent). doppler_spread appended as-is, unbinned. Raw azimuth mean/median and the min/max ratio were both considered and dropped: azimuth's absolute position is scene-geometry, not object physics (risk of a dataset-collection artifact rather than a real class signal); min/max is undefined (0/0) for 34% of x_rel/y_rel instances and sign-flips for 32-66% of the rest, worse than dividing by a small number, dividing by literally zero on a third of the data.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "stat_descriptors",
+      "extra_features": ["doppler_spread"],
+      "feature_stats": {
+        "rcs": ["mean", "median", "std"],
+        "vr_compensated": ["mean", "median"],
+        "radial": ["std"],
+        "azimuth_sc": ["std"]
+      },
+      "run_kwargs": {}
+    },
+    "gaussian_range": {
+      "_note": "Feature design test (section 12): otherwise identical to baseline, only the bin range formula changes. Bins are still equal-width and fraction-normalized (16 bins), but the outer range each feature is split across comes from [mean-2std, mean+2std] (histogram_separability.fit_bin_edges's range_method='gaussian') instead of decision 2's [1st, 99th] percentile. The two ranges agree for a roughly normal distribution but diverge for a skewed/heavy-tailed one, which is what RCS/Doppler look like here - and unlike most feature-design tests in this project, bin range affects every instance including n=1, not just ones with enough points to aggregate.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "gaussian_range",
+      "bin_range": "gaussian",
+      "run_kwargs": {}
+    },
+    "quantile_bins": {
+      "_note": "Feature design test (section 12, alongside gaussian_range): otherwise identical to baseline, but bins are no longer equal-width. Edges are placed so each bin holds roughly the same fraction of training points (histogram_separability.fit_bin_edges's range_method='quantile'), giving more resolution where a feature's data is actually dense and less where it's sparse, instead of 16 bins spent uniformly across the range regardless of where the points are. A stronger version of the same idea gaussian_range tested (which only changed the outer clipping range, still equal-width inside it) and gaussian_range landed null.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "quantile_bins",
+      "bin_range": "quantile",
+      "run_kwargs": {}
     }
   }
 }

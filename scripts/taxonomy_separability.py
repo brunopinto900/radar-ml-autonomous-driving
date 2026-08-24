@@ -26,18 +26,25 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     which are per-point and orientation-dependent (a car seen broadside vs head-on spreads very
     differently across the x/y axes even though it's the same physical object), this is one
     orientation-robust scalar per instance: rotating the point cloud changes x_extent/y_extent
-    individually but their combined diagonal is far more stable), azimuth_extent (instance's
-    angular spread as seen by the sensor, max-min of azimuth_sc - a different physical quantity
-    than spatial_extent, since a fixed-size object further away subtends a smaller angle, this
-    folds in range-dependent apparent size rather than raw Euclidean spread), and doppler_spread
-    (per-instance median absolute deviation of vr_compensated). doppler_spread is the expensive
-    part (~2-3 min at full scale, one Python lambda per instance group), so it's cached to disk
-    keyed by sequence_name and reused if the cache covers the same sequences - same skip-if-covered
-    pattern as build_points_table.py's cache."""
+    individually but their combined diagonal is far more stable), radial (per-point Euclidean
+    distance from the instance's own centroid, sqrt(x_rel^2 + y_rel^2) - unlike spatial_extent,
+    which is a single outer-boundary scalar per instance driven by the two most extreme points,
+    radial is still one value per point, so a statistic like std(radial) describes how the whole
+    point cloud is distributed around its center, not just how big the bounding box is; also
+    exactly rotation-invariant, not just empirically stable, since it's built from a per-point
+    distance rather than two separate axis extents), azimuth_extent (instance's angular spread as
+    seen by the sensor, max-min of azimuth_sc - a different physical quantity than spatial_extent,
+    since a fixed-size object further away subtends a smaller angle, this folds in range-dependent
+    apparent size rather than raw Euclidean spread), and doppler_spread (per-instance median
+    absolute deviation of vr_compensated). doppler_spread is the expensive part (~2-3 min at full
+    scale, one Python lambda per instance group), so it's cached to disk keyed by sequence_name and
+    reused if the cache covers the same sequences - same skip-if-covered pattern as
+    build_points_table.py's cache."""
     df = df.copy()
     group = df.groupby(INSTANCE_COLS)
     df["x_rel"] = df["x_cc"] - group["x_cc"].transform("mean")
     df["y_rel"] = df["y_cc"] - group["y_cc"].transform("mean")
+    df["radial"] = (df["x_rel"] ** 2 + df["y_rel"] ** 2) ** 0.5
     df["n_points"] = group["x_cc"].transform("size")
     df["azimuth_extent"] = group["azimuth_sc"].transform(lambda s: s.max() - s.min())
     x_extent = group["x_cc"].transform(lambda s: s.max() - s.min())

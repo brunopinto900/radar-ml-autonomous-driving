@@ -19,7 +19,7 @@ from torch import nn
 
 from dataloader import MLP_CLASS_GROUPS, RESULTS_DIR
 from feature_distributions import INSTANCE_LEVEL_FEATURES, MLP_CLASSES, POINT_LEVEL_FEATURES
-from histogram_separability import build_histogram_features, fit_bin_edges
+from histogram_separability import build_histogram_features, build_stat_features, fit_bin_edges
 from separability_probe import class_weights
 from sequence_split import load_split
 
@@ -97,6 +97,8 @@ def prepare_split_features(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
     normalize: bool = True,
+    feature_stats: dict[str, list[str]] | None = None,
+    bin_range: str = "percentile",
 ):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
     edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
@@ -108,11 +110,18 @@ def prepare_split_features(
     feature's bins hold the fraction of the instance's points landing there (the default) or raw
     counts (see histogram_separability.build_histogram_features) - raw counts embed point count
     back into the encoding implicitly, at the cost of putting sparse/busy instances on different
-    scales. `splits` (default None) uses the project's standing fixed split (load_split()) - pass
-    an explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to evaluate a different
-    candidate split (see sequence_split.select_best_split), without touching the standing one.
-    Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X
-    float32, y integer class indices in `classes` order."""
+    scales. `bin_range` (default "percentile") picks how each feature's outer bin range is
+    determined before splitting into `n_bins` equal-width bins - see
+    histogram_separability.fit_bin_edges for "percentile" vs "gaussian" ([mean-2std, mean+2std]).
+    `feature_stats` (default None) replaces the histogram encoding entirely with explicit
+    per-instance statistics (see histogram_separability.build_stat_features), e.g. {"rcs":
+    ["mean","median","std"], "radial": ["std"]} - when set, `n_bins`/`features`/`normalize`/
+    `bin_range` are unused, since there are no bin edges to fit (each instance's stats depend only
+    on its own points). `splits` (default None) uses the project's standing fixed split
+    (load_split()) - pass an explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to
+    evaluate a different candidate split (see sequence_split.select_best_split), without touching
+    the standing one. Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as
+    numpy arrays. X float32, y integer class indices in `classes` order."""
     class_to_idx = {cls: i for i, cls in enumerate(classes)}
     if splits is None:
         splits = load_split()
@@ -121,16 +130,24 @@ def prepare_split_features(
     val_df = df.loc[df["sequence_name"].isin(splits["val"])]
     test_df = df.loc[df["sequence_name"].isin(splits["test"])]
 
-    edges = fit_bin_edges(train_df, n_bins, features)
+    if feature_stats is None:
+        edges = fit_bin_edges(train_df, n_bins, features, range_method=bin_range)
 
-    def to_xy(split_df):
-        hist = build_histogram_features(
-            split_df, n_bins, classes, features, edges=edges, extra_features=extra_features, normalize=normalize
-        )
-        feature_cols = [c for c in hist.columns if c not in ("sequence_name", "group")]
-        X = hist[feature_cols].to_numpy(dtype="float32")
-        y = hist["group"].map(class_to_idx).to_numpy(dtype="int64")
-        return X, y, feature_cols
+        def to_xy(split_df):
+            hist = build_histogram_features(
+                split_df, n_bins, classes, features, edges=edges, extra_features=extra_features, normalize=normalize
+            )
+            feature_cols = [c for c in hist.columns if c not in ("sequence_name", "group")]
+            X = hist[feature_cols].to_numpy(dtype="float32")
+            y = hist["group"].map(class_to_idx).to_numpy(dtype="int64")
+            return X, y, feature_cols
+    else:
+        def to_xy(split_df):
+            stats = build_stat_features(split_df, classes, feature_stats, extra_features=extra_features)
+            feature_cols = [c for c in stats.columns if c not in ("sequence_name", "group")]
+            X = stats[feature_cols].to_numpy(dtype="float32")
+            y = stats["group"].map(class_to_idx).to_numpy(dtype="int64")
+            return X, y, feature_cols
 
     X_train, y_train, feature_cols = to_xy(train_df)
     X_val, y_val, _ = to_xy(val_df)
@@ -232,6 +249,8 @@ def evaluate_val_metrics(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
     normalize: bool = True,
+    feature_stats: dict[str, list[str]] | None = None,
+    bin_range: str = "percentile",
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -264,7 +283,7 @@ def evaluate_val_metrics(
 
     _, _, X_val, y_val, _, _, _ = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
-        normalize=normalize,
+        normalize=normalize, feature_stats=feature_stats, bin_range=bin_range,
     )
 
     model = MLP(
@@ -327,6 +346,8 @@ def evaluate_by_point_count(
     features: list[str] = POINT_LEVEL_FEATURES,
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
+    feature_stats: dict[str, list[str]] | None = None,
+    bin_range: str = "percentile",
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -361,7 +382,8 @@ def evaluate_by_point_count(
     fetch_extra_features = extra_features if already_has_n_points else [*extra_features, "n_points"]
 
     _, _, X_val, y_val, _, _, feature_cols = prepare_split_features(
-        df, classes=classes, features=features, extra_features=fetch_extra_features, splits=splits
+        df, classes=classes, features=features, extra_features=fetch_extra_features, splits=splits,
+        feature_stats=feature_stats, bin_range=bin_range,
     )
     n_points_col = X_val[:, feature_cols.index("n_points")].astype(int)
     X_model = X_val if already_has_n_points else X_val[:, :-1]
@@ -490,6 +512,8 @@ def run_training(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     splits: dict[str, list[str]] | None = None,
     normalize: bool = True,
+    feature_stats: dict[str, list[str]] | None = None,
+    bin_range: str = "percentile",
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -499,28 +523,30 @@ def run_training(
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
     caller train on a different class taxonomy against the same fixed split (see
-    mlp_variants.py); `features`/`extra_features`/`normalize` (see prepare_split_features) let a
-    caller swap the feature set or encoding instead, e.g. binning range_sc in place of
-    doppler_spread, or raw per-bin counts instead of fractions; `splits` lets a caller evaluate a
-    different candidate split instead of the standing fixed one (see
-    sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers` let a caller change model
-    capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add regularization/stabilization
-    (default 0.0/0.0/False, off, reproducing the original baseline). Writes to `output_dir`
-    (default MLP_DIR) - pass a different directory (e.g. MLP_DIR / f"epochs_{epochs}") to keep a
-    run's cache separate from the default baseline instead of overwriting it. Returns (model,
-    history, X_test, y_test) - X_test/y_test are returned but NOT evaluated here; call
-    evaluate_test explicitly once."""
+    mlp_variants.py); `features`/`extra_features`/`normalize`/`feature_stats`/`bin_range` (see
+    prepare_split_features) let a caller swap the feature set or encoding instead, e.g. binning
+    range_sc in place of doppler_spread, raw per-bin counts instead of fractions, explicit
+    per-instance statistics instead of histograms entirely, or a mean/std-based bin range instead
+    of percentile-based; `splits` lets a caller evaluate a different candidate split instead of
+    the standing fixed one (see sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers`
+    let a caller change model capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add
+    regularization/stabilization (default 0.0/0.0/False, off, reproducing the original baseline).
+    Writes to `output_dir` (default MLP_DIR) - pass a different directory (e.g. MLP_DIR /
+    f"epochs_{epochs}") to keep a run's cache separate from the default baseline instead of
+    overwriting it. Returns (model, history, X_test, y_test) - X_test/y_test are returned but NOT
+    evaluated here; call evaluate_test explicitly once."""
     cache_key = {
-        "n_bins": N_BINS, "hidden_dim": hidden_dim, "n_hidden_layers": n_hidden_layers,
-        "dropout": dropout, "weight_decay": weight_decay, "batch_norm": batch_norm,
-        "epochs": epochs, "batch_size": batch_size, "lr": lr, "random_state": random_state,
+        "n_bins": N_BINS, "bin_range": bin_range, "feature_stats": feature_stats,
+        "hidden_dim": hidden_dim, "n_hidden_layers": n_hidden_layers, "dropout": dropout,
+        "weight_decay": weight_decay, "batch_norm": batch_norm, "epochs": epochs,
+        "batch_size": batch_size, "lr": lr, "random_state": random_state,
     }
     history_cache = output_dir / HISTORY_FILENAME
     model_cache = output_dir / MODEL_FILENAME
 
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
-        normalize=normalize,
+        normalize=normalize, feature_stats=feature_stats, bin_range=bin_range,
     )
 
     if history_cache.exists() and model_cache.exists():

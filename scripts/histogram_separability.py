@@ -21,13 +21,38 @@ SWEEP_CACHE = HISTOGRAM_SEPARABILITY_DIR / "bin_sweep_results.parquet"
 
 
 def fit_bin_edges(
-    df: pd.DataFrame, n_bins: int, features: list[str] = POINT_LEVEL_FEATURES
+    df: pd.DataFrame, n_bins: int, features: list[str] = POINT_LEVEL_FEATURES, range_method: str = "percentile"
 ) -> dict[str, np.ndarray]:
-    """Percentile-based bin edges ([1st, 99th] percentile, decision 2), fit from `df` alone. Pass
-    a train-only df and reuse the returned edges for val/test via build_histogram_features's
-    `edges` param - bin boundaries are a fitted preprocessing parameter, so refitting them per
-    split would leak val/test's distribution into where the bins fall."""
-    return {feature: np.linspace(df[feature].quantile(0.01), df[feature].quantile(0.99), n_bins + 1) for feature in features}
+    """Bin edges fit from `df` alone (pass a train-only df and reuse the returned edges for
+    val/test via build_histogram_features's `edges` param - bin boundaries are a fitted
+    preprocessing parameter, so refitting them per split would leak val/test's distribution into
+    where the bins fall). `range_method` picks how the edges are placed: "percentile" (default,
+    decision 2) and "gaussian" both split n_bins EQUAL-WIDTH bins across a clipped outer range,
+    [1st, 99th] percentile vs [mean - 2*std, mean + 2*std] - the two agree closely for a roughly
+    normal distribution but diverge for a skewed/heavy-tailed one, which is exactly what this
+    project's RCS/Doppler features look like, 2 std devs can clip a different (and
+    outlier-sensitive, since std itself is outlier-sensitive) fraction of the data than the
+    1st/99th percentile does. "quantile" is a different kind of change, not just a different
+    range but UNEQUAL-width bins: edges are placed so each bin holds roughly the same fraction of
+    training points (np.quantile at n_bins+1 evenly spaced probabilities over the full [0, 1]
+    range, no separate outlier clipping needed - the outermost bins naturally widen to absorb the
+    sparse tails). That gives more resolution where the data is actually dense and less where
+    it's sparse, instead of n_bins spent uniformly across the range regardless of where the points
+    are. Can produce duplicate/non-increasing edges if a feature has enough exactly-repeated
+    values concentrated at one quantile (not checked for here - watch for a degenerate/empty bin
+    if a feature turns out to be very spiky)."""
+    if range_method == "percentile":
+        return {feature: np.linspace(df[feature].quantile(0.01), df[feature].quantile(0.99), n_bins + 1) for feature in features}
+    if range_method == "gaussian":
+        return {
+            feature: np.linspace(
+                df[feature].mean() - 2 * df[feature].std(), df[feature].mean() + 2 * df[feature].std(), n_bins + 1
+            )
+            for feature in features
+        }
+    if range_method == "quantile":
+        return {feature: df[feature].quantile(np.linspace(0, 1, n_bins + 1)).to_numpy() for feature in features}
+    raise ValueError(f"unknown range_method: {range_method!r}")
 
 
 def build_histogram_features(
@@ -78,6 +103,38 @@ def build_histogram_features(
     extra = df.drop_duplicates(INSTANCE_COLS).set_index(INSTANCE_COLS, drop=False)
     extra = extra[extra_features + ["group", "sequence_name"]]
     return features_df.join(extra).reset_index(drop=True)
+
+
+def build_stat_features(
+    df: pd.DataFrame,
+    classes: list[str] = FINAL_CLASSES,
+    feature_stats: dict[str, list[str]] | None = None,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+) -> pd.DataFrame:
+    """One row per instance: each point-level feature in `feature_stats` (e.g. {"rcs":
+    ["mean","median","std"], "radial": ["std"]}) becomes one column per requested statistic,
+    aggregated directly from that instance's own points - no bin edges to fit, unlike
+    build_histogram_features, since each instance's mean/median/std depends only on its own
+    points, nothing to fit on train alone and reuse on val/test. "std" uses ddof=0 (population,
+    not sample) so a 1-point instance gets a well-defined 0 instead of NaN (ddof=1 divides by
+    n-1, undefined at n=1). `extra_features` (default doppler_spread) are appended as-is via
+    .first(), since they're already one value per instance, broadcast to every point row -
+    aggregating them the same way as a point-level feature would be degenerate (every point in an
+    instance shares the identical value, so e.g. std would always come out 0)."""
+    df = df.loc[df["group"].isin(classes)]
+    group = df.groupby(INSTANCE_COLS)
+
+    stat_cols = []
+    for feature, stats in feature_stats.items():
+        for stat in stats:
+            col = group[feature].std(ddof=0) if stat == "std" else getattr(group[feature], stat)()
+            col.name = f"{feature}_{stat}"
+            stat_cols.append(col)
+    stat_df = pd.concat(stat_cols, axis=1)
+
+    extra = df.drop_duplicates(INSTANCE_COLS).set_index(INSTANCE_COLS, drop=False)
+    extra = extra[extra_features + ["group", "sequence_name"]]
+    return stat_df.join(extra).reset_index(drop=True)
 
 
 def run_bin_sweep(
