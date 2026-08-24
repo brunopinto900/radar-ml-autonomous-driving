@@ -319,6 +319,81 @@ def evaluate_val_metrics(
     return metrics_df, fig, bar_fig
 
 
+def evaluate_by_point_count(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    output_dir=MLP_DIR,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    splits: dict[str, list[str]] | None = None,
+    hidden_dim: int = HIDDEN_DIM,
+    n_hidden_layers: int = 2,
+    dropout: float = 0.0,
+    batch_norm: bool = False,
+    bins: tuple[int, ...] = (1, 2, 3, 4, 5, 10, 999),
+) -> pd.DataFrame:
+    """Buckets val predictions from the cached model in `output_dir` by instance point count
+    (n_points) and reports per-bucket support, accuracy, macro F1, and per-class F1. Answers a
+    different question than the n_points/raw_counts feature tests (section 8): those asked
+    whether handing the network point count as an input helps; this asks whether point count
+    itself, independent of any feature, explains why error is high - i.e. is sparsity a real
+    driver of the ceiling, checked directly against the model's actual predictions rather than
+    inferred from six null feature-design results. Never retrains, only loads (same cached model
+    `evaluate_val_metrics` uses). `bins` (default 1/2/3/4/5/6-10/11+) sets the bucket edges,
+    passed to `pandas.cut` with `bins=(0, *bins)`.
+
+    n_points isn't necessarily part of `features`/`extra_features` (it isn't for baseline), so
+    it's always fetched by appending it to `extra_features` if not already present, and excluded
+    from the model's input columns afterward - unless the variant being evaluated already trains
+    on n_points (e.g. the `n_points` variant itself), in which case it's already a real input
+    column and stays one; only the freshly-appended copy is stripped."""
+    from sklearn.metrics import f1_score
+
+    model_cache = output_dir / MODEL_FILENAME
+    if not model_cache.exists():
+        raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
+
+    already_has_n_points = "n_points" in extra_features
+    fetch_extra_features = extra_features if already_has_n_points else [*extra_features, "n_points"]
+
+    _, _, X_val, y_val, _, _, feature_cols = prepare_split_features(
+        df, classes=classes, features=features, extra_features=fetch_extra_features, splits=splits
+    )
+    n_points_col = X_val[:, feature_cols.index("n_points")].astype(int)
+    X_model = X_val if already_has_n_points else X_val[:, :-1]
+
+    model = MLP(
+        input_dim=X_model.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
+        n_hidden_layers=n_hidden_layers, dropout=dropout, batch_norm=batch_norm,
+    ).to(DEVICE)
+    model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+    model.eval()
+    with torch.no_grad():
+        y_pred = model(torch.tensor(X_model, device=DEVICE)).argmax(dim=1).cpu().numpy()
+
+    labels = [str(bins[0])] + [
+        str(bins[i]) if bins[i] == bins[i - 1] + 1 else f"{bins[i - 1] + 1}-{bins[i]}"
+        for i in range(1, len(bins) - 1)
+    ] + [f"{bins[-2] + 1}+"]
+    bucket = pd.cut(n_points_col, bins=[0, *bins], labels=labels)
+
+    rows = []
+    for lbl in labels:
+        mask = np.asarray(bucket == lbl)
+        n = int(mask.sum())
+        row = {"bucket": lbl, "n": n}
+        if n:
+            row["accuracy"] = (y_pred[mask] == y_val[mask]).mean()
+            row["macro_f1"] = f1_score(y_val[mask], y_pred[mask], labels=range(len(classes)), average="macro", zero_division=0)
+            per_class = f1_score(y_val[mask], y_pred[mask], labels=range(len(classes)), average=None, zero_division=0)
+            row.update({f"f1_{cls}": v for cls, v in zip(classes, per_class)})
+        rows.append(row)
+
+    summary = pd.DataFrame(rows).set_index("bucket")
+    print(summary.round(3).to_string())
+    return summary
+
+
 def plot_training_curves(history: list[dict], output_dir=MLP_DIR):
     import matplotlib.pyplot as plt
 
