@@ -73,6 +73,14 @@
       "class_groups_base": "MLP_CLASS_GROUPS",
       "output_dir": "deep10",
       "run_kwargs": {"n_hidden_layers": 10, "dropout": 0.1, "weight_decay": 1e-4, "batch_norm": true, "lr": 1e-03, "epochs": 100}
+    },
+    "n_points": {
+      "_note": "Feature design test (section 8): baseline plus one extra scalar, n_points (instance's raw point count, appended unbinned like doppler_spread). The histogram features are fraction-of-points-per-bin, which throws point count away entirely - targets the pedestrian/pedestrian_group confusion (high pedestrian recall, low precision) directly, since that's fundamentally a 'how many people' question a fraction-normalized histogram can't answer.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "n_points",
+      "extra_features": ["doppler_spread", "n_points"],
+      "run_kwargs": {}
     }
   }
 }

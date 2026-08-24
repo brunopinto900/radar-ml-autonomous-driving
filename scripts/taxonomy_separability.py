@@ -19,15 +19,18 @@ DOPPLER_SPREAD_CACHE = RESULTS_DIR / "data" / "doppler_spread_cache.parquet"
 
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add x_rel/y_rel (point position relative to its instance's centroid, mean-centered)
-    and doppler_spread (per-instance median absolute deviation of vr_compensated). doppler_spread
-    is the expensive part (~2-3 min at full scale, one Python lambda per instance group), so it's
-    cached to disk keyed by sequence_name and reused if the cache covers the same sequences -
-    same skip-if-covered pattern as build_points_table.py's cache."""
+    """Add x_rel/y_rel (point position relative to its instance's centroid, mean-centered),
+    n_points (instance's raw point count, broadcast to every one of its rows - cheap groupby
+    size, no caching needed unlike doppler_spread below), and doppler_spread (per-instance
+    median absolute deviation of vr_compensated). doppler_spread is the expensive part (~2-3 min
+    at full scale, one Python lambda per instance group), so it's cached to disk keyed by
+    sequence_name and reused if the cache covers the same sequences - same skip-if-covered
+    pattern as build_points_table.py's cache."""
     df = df.copy()
     group = df.groupby(INSTANCE_COLS)
     df["x_rel"] = df["x_cc"] - group["x_cc"].transform("mean")
     df["y_rel"] = df["y_cc"] - group["y_cc"].transform("mean")
+    df["n_points"] = group["x_cc"].transform("size")
 
     sequences = set(df["sequence_name"].unique())
     if DOPPLER_SPREAD_CACHE.exists():
