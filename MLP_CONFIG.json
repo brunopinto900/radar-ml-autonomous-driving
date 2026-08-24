@@ -136,6 +136,14 @@
       "output_dir": "quantile_bins",
       "bin_range": "quantile",
       "run_kwargs": {}
+    },
+    "standardized": {
+      "_note": "Feature design test (section 13): otherwise identical to baseline, z-score standardizes doppler_spread (train-fit mean/std, applied unchanged to val/test) before it reaches the network. The 64 histogram-bin columns are already bounded [0,1] (fractions); doppler_spread isn't (train range 0-59.2, mean 0.233), a scale mismatch at the input layer flagged but not tested directly back in section 7's deep10 writeup - Adam's per-parameter step size likely blunts it, which is probably why it hasn't visibly broken anything, but 'probably blunted' isn't the same as tested.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "standardized",
+      "standardize_extra": true,
+      "run_kwargs": {}
     }
   }
 }

@@ -30,7 +30,9 @@ def _load_variants() -> dict:
             "output_dir": output_dir,
             "run_kwargs": entry.get("run_kwargs", {}),
         }
-        for optional_key in ("features", "extra_features", "normalize", "feature_stats", "bin_range"):
+        for optional_key in (
+            "features", "extra_features", "normalize", "feature_stats", "bin_range", "standardize_extra",
+        ):
             if optional_key in entry:
                 config[optional_key] = entry[optional_key]
         variants[name] = config
@@ -65,7 +67,7 @@ def run_variant(raw_df, variant: str):
     df = build_variant_df(raw_df, variant)
     feature_kwargs = {
         k: config[k]
-        for k in ("features", "extra_features", "normalize", "feature_stats", "bin_range")
+        for k in ("features", "extra_features", "normalize", "feature_stats", "bin_range", "standardize_extra")
         if k in config
     }
     arch_kwargs = {

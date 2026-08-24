@@ -99,6 +99,7 @@ def prepare_split_features(
     normalize: bool = True,
     feature_stats: dict[str, list[str]] | None = None,
     bin_range: str = "percentile",
+    standardize_extra: bool = False,
 ):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
     edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
@@ -117,11 +118,16 @@ def prepare_split_features(
     per-instance statistics (see histogram_separability.build_stat_features), e.g. {"rcs":
     ["mean","median","std"], "radial": ["std"]} - when set, `n_bins`/`features`/`normalize`/
     `bin_range` are unused, since there are no bin edges to fit (each instance's stats depend only
-    on its own points). `splits` (default None) uses the project's standing fixed split
-    (load_split()) - pass an explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to
-    evaluate a different candidate split (see sequence_split.select_best_split), without touching
-    the standing one. Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as
-    numpy arrays. X float32, y integer class indices in `classes` order."""
+    on its own points). `standardize_extra` (default False) z-score standardizes (train-fit
+    mean/std, applied unchanged to val/test, same fit-on-train-only discipline as the bin edges)
+    whichever columns aren't already bounded [0,1] fractions: in histogram mode that's just
+    `extra_features` (e.g. `doppler_spread`, train range 0-59.2 vs the bin columns' [0,1]), in
+    feature_stats mode it's every column, since none of them are fraction bins to begin with.
+    `splits` (default None) uses the project's standing fixed split (load_split()) - pass an
+    explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to evaluate a different
+    candidate split (see sequence_split.select_best_split), without touching the standing one.
+    Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X
+    float32, y integer class indices in `classes` order."""
     class_to_idx = {cls: i for i, cls in enumerate(classes)}
     if splits is None:
         splits = load_split()
@@ -152,6 +158,16 @@ def prepare_split_features(
     X_train, y_train, feature_cols = to_xy(train_df)
     X_val, y_val, _ = to_xy(val_df)
     X_test, y_test, _ = to_xy(test_df)
+
+    if standardize_extra:
+        n_unbounded = len(extra_features) if feature_stats is None else len(feature_cols)
+        cols = slice(len(feature_cols) - n_unbounded, len(feature_cols))
+        mean = X_train[:, cols].mean(axis=0)
+        std = X_train[:, cols].std(axis=0)
+        std = np.where(std > 0, std, 1.0)
+        for X in (X_train, X_val, X_test):
+            X[:, cols] = (X[:, cols] - mean) / std
+
     return X_train, y_train, X_val, y_val, X_test, y_test, feature_cols
 
 
@@ -251,6 +267,7 @@ def evaluate_val_metrics(
     normalize: bool = True,
     feature_stats: dict[str, list[str]] | None = None,
     bin_range: str = "percentile",
+    standardize_extra: bool = False,
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -284,6 +301,7 @@ def evaluate_val_metrics(
     _, _, X_val, y_val, _, _, _ = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
         normalize=normalize, feature_stats=feature_stats, bin_range=bin_range,
+        standardize_extra=standardize_extra,
     )
 
     model = MLP(
@@ -348,6 +366,7 @@ def evaluate_by_point_count(
     splits: dict[str, list[str]] | None = None,
     feature_stats: dict[str, list[str]] | None = None,
     bin_range: str = "percentile",
+    standardize_extra: bool = False,
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -368,25 +387,31 @@ def evaluate_by_point_count(
     passed to `pandas.cut` with `bins=(0, *bins)`.
 
     n_points isn't necessarily part of `features`/`extra_features` (it isn't for baseline), so
-    it's always fetched by appending it to `extra_features` if not already present, and excluded
-    from the model's input columns afterward - unless the variant being evaluated already trains
-    on n_points (e.g. the `n_points` variant itself), in which case it's already a real input
-    column and stays one; only the freshly-appended copy is stripped."""
+    it's fetched via a second, separate call to prepare_split_features with n_points appended to
+    extra_features, always with standardize_extra=False regardless of what the model itself was
+    trained with - n_points here is the bucketing key, not a model input, so it must stay in raw
+    units. The model's own input vector comes from a first, separate call using the real
+    features/extra_features/standardize_extra, so the two never interfere."""
     from sklearn.metrics import f1_score, precision_recall_fscore_support
 
     model_cache = output_dir / MODEL_FILENAME
     if not model_cache.exists():
         raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
 
-    already_has_n_points = "n_points" in extra_features
-    fetch_extra_features = extra_features if already_has_n_points else [*extra_features, "n_points"]
+    _, _, X_model, y_val, _, _, _ = prepare_split_features(
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits,
+        feature_stats=feature_stats, bin_range=bin_range, standardize_extra=standardize_extra,
+    )
 
-    _, _, X_val, y_val, _, _, feature_cols = prepare_split_features(
-        df, classes=classes, features=features, extra_features=fetch_extra_features, splits=splits,
+    # n_points is fetched separately, always unstandardized - it's the bucketing key, not a model
+    # input, so standardize_extra (if set) must not touch it regardless of what the model itself
+    # was trained on
+    raw_extra_features = extra_features if "n_points" in extra_features else [*extra_features, "n_points"]
+    _, _, X_raw, _, _, _, raw_feature_cols = prepare_split_features(
+        df, classes=classes, features=features, extra_features=raw_extra_features, splits=splits,
         feature_stats=feature_stats, bin_range=bin_range,
     )
-    n_points_col = X_val[:, feature_cols.index("n_points")].astype(int)
-    X_model = X_val if already_has_n_points else X_val[:, :-1]
+    n_points_col = X_raw[:, raw_feature_cols.index("n_points")].astype(int)
 
     model = MLP(
         input_dim=X_model.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
@@ -514,6 +539,7 @@ def run_training(
     normalize: bool = True,
     feature_stats: dict[str, list[str]] | None = None,
     bin_range: str = "percentile",
+    standardize_extra: bool = False,
     hidden_dim: int = HIDDEN_DIM,
     n_hidden_layers: int = 2,
     dropout: float = 0.0,
@@ -523,13 +549,14 @@ def run_training(
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
     config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
     caller train on a different class taxonomy against the same fixed split (see
-    mlp_variants.py); `features`/`extra_features`/`normalize`/`feature_stats`/`bin_range` (see
-    prepare_split_features) let a caller swap the feature set or encoding instead, e.g. binning
-    range_sc in place of doppler_spread, raw per-bin counts instead of fractions, explicit
-    per-instance statistics instead of histograms entirely, or a mean/std-based bin range instead
-    of percentile-based; `splits` lets a caller evaluate a different candidate split instead of
-    the standing fixed one (see sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers`
-    let a caller change model capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add
+    mlp_variants.py); `features`/`extra_features`/`normalize`/`feature_stats`/`bin_range`/
+    `standardize_extra` (see prepare_split_features) let a caller swap the feature set or encoding
+    instead, e.g. binning range_sc in place of doppler_spread, raw per-bin counts instead of
+    fractions, explicit per-instance statistics instead of histograms entirely, a mean/std-based
+    bin range instead of percentile-based, or z-score standardizing the non-fraction columns;
+    `splits` lets a caller evaluate a different candidate split instead of the standing fixed one
+    (see sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers` let a caller change
+    model capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add
     regularization/stabilization (default 0.0/0.0/False, off, reproducing the original baseline).
     Writes to `output_dir` (default MLP_DIR) - pass a different directory (e.g. MLP_DIR /
     f"epochs_{epochs}") to keep a run's cache separate from the default baseline instead of
@@ -537,9 +564,10 @@ def run_training(
     evaluated here; call evaluate_test explicitly once."""
     cache_key = {
         "n_bins": N_BINS, "bin_range": bin_range, "feature_stats": feature_stats,
-        "hidden_dim": hidden_dim, "n_hidden_layers": n_hidden_layers, "dropout": dropout,
-        "weight_decay": weight_decay, "batch_norm": batch_norm, "epochs": epochs,
-        "batch_size": batch_size, "lr": lr, "random_state": random_state,
+        "standardize_extra": standardize_extra, "hidden_dim": hidden_dim,
+        "n_hidden_layers": n_hidden_layers, "dropout": dropout, "weight_decay": weight_decay,
+        "batch_norm": batch_norm, "epochs": epochs, "batch_size": batch_size, "lr": lr,
+        "random_state": random_state,
     }
     history_cache = output_dir / HISTORY_FILENAME
     model_cache = output_dir / MODEL_FILENAME
@@ -547,6 +575,7 @@ def run_training(
     X_train, y_train, X_val, y_val, X_test, y_test, feature_cols = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
         normalize=normalize, feature_stats=feature_stats, bin_range=bin_range,
+        standardize_extra=standardize_extra,
     )
 
     if history_cache.exists() and model_cache.exists():
