@@ -30,6 +30,19 @@ def class_weights(labels: pd.Series) -> dict[str, float]:
     return (counts.max() / counts).to_dict()
 
 
+def per_class_auc(y_true, y_proba: np.ndarray, class_labels: np.ndarray) -> dict:
+    """One-vs-rest ROC-AUC per class. roc_auc_score's multi_class="ovr" path requires >=3
+    classes - for exactly 2 it raises ("y should be a 1d array"), since sklearn expects a plain
+    1d score for binary. Handled directly here: for 2 classes, AUC is the same value from either
+    class's perspective (rank order and positive/negative flip together), so one binary
+    roc_auc_score call covers both."""
+    if len(class_labels) == 2:
+        auc = roc_auc_score(y_true, y_proba[:, 1])
+        return {class_labels[0]: auc, class_labels[1]: auc}
+    auc_scores = roc_auc_score(y_true, y_proba, multi_class="ovr", average=None, labels=class_labels)
+    return dict(zip(class_labels, auc_scores))
+
+
 def pairwise_roc_auc(clf, X, y_true, classes: list[str]) -> dict:
     """One-vs-one ROC-AUC per class pair: for each pair (A, B), restrict to the subset of X/y
     where the true label is A or B, and rank by the model's raw P(A) score (not renormalized
@@ -112,8 +125,7 @@ def run_probe(
         y_proba = clf.predict_proba(X_te)
 
         report = classification_report(y_test, y_pred)
-        auc_scores = roc_auc_score(y_test, y_proba, multi_class="ovr", average=None, labels=clf.classes_)
-        auc_per_class = dict(zip(clf.classes_, auc_scores))
+        auc_per_class = per_class_auc(y_test, y_proba, clf.classes_)
 
         precision, recall, f1, support = precision_recall_fscore_support(
             y_test, y_pred, labels=classes, zero_division=0
@@ -200,11 +212,11 @@ def run_probe_cv(
             y_pred = clf.predict(X_te)
             y_proba = clf.predict_proba(X_te)
 
-            auc_scores = roc_auc_score(y_test, y_proba, multi_class="ovr", average=None, labels=clf.classes_)
+            auc_per_class = per_class_auc(y_test, y_proba, clf.classes_)
             precision, recall, f1, _ = precision_recall_fscore_support(
                 y_test, y_pred, labels=classes, zero_division=0
             )
-            fold_scores[name]["auc"].append(dict(zip(clf.classes_, auc_scores)))
+            fold_scores[name]["auc"].append(auc_per_class)
             fold_scores[name]["precision"].append(dict(zip(classes, precision)))
             fold_scores[name]["recall"].append(dict(zip(classes, recall)))
             fold_scores[name]["f1"].append(dict(zip(classes, f1)))
