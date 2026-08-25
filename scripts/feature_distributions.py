@@ -63,33 +63,43 @@ def feature_percentiles(
     return result
 
 
-def plot_bin_sweep(
-    df: pd.DataFrame, features: list[str] = HISTOGRAM_FEATURES, bin_counts: tuple[int, ...] = (8, 16, 32, 64)
+def plot_per_class_distributions(
+    df: pd.DataFrame,
+    features: list[str] = HISTOGRAM_FEATURES,
+    classes: list[str] = FINAL_CLASSES,
+    n_bins: int = 32,
 ):
-    """One figure per feature: the same pooled distribution (all final classes combined) shown
-    at a few candidate bin counts side by side, for visually comparing the resolution/sparsity
-    tradeoff directly, not a per-class comparison. Point-level features pool every point;
-    doppler_spread pools one value per instance (see feature_values). Saves each to
-    results/bin_sweep_<feature>.png. Returns {feature: fig}."""
+    """One figure per feature: that feature's distribution split out per class (own subplot,
+    own p1/p99 range each). A distribution pooled across classes can look multimodal purely
+    from mixing classes with different central tendencies, this isolates whether a single
+    class's own distribution has that shape. Saves each to
+    results/feature_distributions/per_class_<feature>.png. Returns {feature: fig}."""
     instances = df.drop_duplicates(["sequence_name", "timestamp", "track_id"])
 
     figs = {}
     for feature in features:
-        values = feature_values(df, instances, feature)
-        lo, hi = values.quantile(0.01), values.quantile(0.99)
-        fig, axes = plt.subplots(1, len(bin_counts), figsize=(4 * len(bin_counts), 4))
-        for ax, n_bins in zip(axes, bin_counts):
+        n_cols = 3
+        n_rows = -(-len(classes) // n_cols)
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.5 * n_rows))
+        axes = axes.flatten()
+        for ax, cls in zip(axes, classes):
+            sub = df.loc[df["group"] == cls]
+            sub_instances = instances.loc[instances["group"] == cls]
+            values = feature_values(sub, sub_instances, feature)
+            lo, hi = values.quantile(0.01), values.quantile(0.99)
             ax.hist(values, bins=n_bins, range=(lo, hi), color="tab:blue", edgecolor="k", linewidth=0.3)
-            ax.set_title(f"{n_bins} bins")
+            ax.set_title(f"{cls} (n={len(values)})")
             ax.set_xlabel(feature)
-        fig.suptitle(f"{feature}: bin count sweep (pooled, {len(values)} values, range=[p1,p99])")
+        for ax in axes[len(classes):]:
+            ax.axis("off")
+        fig.suptitle(f"{feature}: per-class distribution ({n_bins} bins, range=[p1,p99] per class)")
         fig.tight_layout()
         figs[feature] = fig
 
     feature_dist_dir = RESULTS_DIR / "feature_distributions"
     feature_dist_dir.mkdir(parents=True, exist_ok=True)
     for feature, fig in figs.items():
-        path = feature_dist_dir / f"bin_sweep_{feature}.png"
+        path = feature_dist_dir / f"per_class_{feature}.png"
         fig.savefig(path, dpi=150)
         print(f"Saved {path}")
 
@@ -104,4 +114,4 @@ if __name__ == "__main__":
     df = apply_class_groups(df)
 
     feature_percentiles(df)
-    plot_bin_sweep(df)
+    plot_per_class_distributions(df)
