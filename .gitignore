@@ -2,6 +2,7 @@ data/
 older_docs/
 .radar_ml/
 TODO.md
+interview.md
 EDA.md
 FEATURE_MAP_FINDINGS.md
 MLP_DESIGN.md

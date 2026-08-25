@@ -31,7 +31,7 @@
       "run_kwargs": {}
     },
     "bs32": {
-      "_note": "Re-checks BATCH_SIZE=128 now that bus is merged: two_wheeler (7.0%) only needs bs=32, unlike bus's original 1.9%. Found no real difference (section 5).",
+      "_note": "Re-checks BATCH_SIZE=128 now that bus is merged: two_wheeler (7.0%) only needs bs=32, unlike bus's original 1.9%. Found no real difference (macro F1 0.687 vs baseline's 0.686) - not yet written up in MLP_Decisions_and_Findings.md, section 1's batch-size decision is still backed only by the miss-probability argument, not this empirical check.",
       "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
       "class_groups_base": "MLP_CLASS_GROUPS",
       "output_dir": "bs32",
@@ -138,7 +138,7 @@
       "run_kwargs": {}
     },
     "standardized": {
-      "_note": "Feature design test (section 13): otherwise identical to baseline, z-score standardizes doppler_spread (train-fit mean/std, applied unchanged to val/test) before it reaches the network. The 64 histogram-bin columns are already bounded [0,1] (fractions); doppler_spread isn't (train range 0-59.2, mean 0.233), a scale mismatch at the input layer flagged but not tested directly back in section 7's deep10 writeup - Adam's per-parameter step size likely blunts it, which is probably why it hasn't visibly broken anything, but 'probably blunted' isn't the same as tested.",
+      "_note": "Feature design test: otherwise identical to baseline, z-score standardizes doppler_spread (train-fit mean/std, applied unchanged to val/test) before it reaches the network. The 64 histogram-bin columns are already bounded [0,1] (fractions); doppler_spread isn't (train range 0-59.2, mean 0.233), a scale mismatch at the input layer flagged in section 7's deep10 writeup but not tested there. Result: macro F1 0.688 vs baseline's 0.686, inside the noise floor - not yet written up in MLP_Decisions_and_Findings.md, so section 7's 'open, not acted on' note is currently stale (this was run, just not incorporated into the doc).",
       "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
       "class_groups_base": "MLP_CLASS_GROUPS",
       "output_dir": "standardized",

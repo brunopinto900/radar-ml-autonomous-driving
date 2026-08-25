@@ -10,7 +10,7 @@ Ranked by size of effect, not the order tested. Each item points at the numbered
 
 **4. Root cause is data collection, not splitting.** RadarScenes is fixed and already collected: naturalistic driving passively records whatever crosses the sensor's path, so rare classes end up with thin, incidental coverage of their possible presentations while common classes (`car`) receive broad coverage inherently. The practical response isn't a better split, a split-selection test scoring 6 candidate splits by train/val distribution match found no candidate to be a demonstrated improvement (macro F1 ranged 0.651-0.734 purely from split choice, best-matching split scored near the worst). Instead, it's identifying which classes have this thin coverage before trusting a single number for them, instance count, distinct sequence count, share from the single busiest sequence (`taxonomy_separability.plot_taxonomy_class_balance`), a groupby, not a training run.
 
-**5. Everything else tested, ruled out inside noise:** capacity (section 6), depth (section 7), point count as an input feature (section 8), spatial/azimuth extent alone (section 9), explicit statistics instead of histograms (section 11), bin edge placement (section 12), `rcs_extent`/`spatial_extent` in isolation (section 14b). Dropping sparse instances instead of working around them was also tried and made things much worse (val accuracy 74.1% -> 48.6%), confirming sparse instances carry real, weak-but-usable signal rather than noise.
+**5. Everything else tested, ruled out inside noise:** batch size (section 1), capacity (section 6), depth (section 7), the `doppler_spread` scale mismatch (section 7), point count as an input feature (section 8), spatial/azimuth extent alone (section 9), explicit statistics instead of histograms (section 11), bin edge placement (section 12), `rcs_extent`/`spatial_extent` in isolation (section 14b). Dropping sparse instances instead of working around them was also tried and made things much worse (val accuracy 74.1% -> 48.6%), confirming sparse instances carry real, weak-but-usable signal rather than noise.
 
 **6. Process lesson: cheap-diagnostic-first discipline was inconsistent.** Section 10's point count diagnostic (no retraining, slices an existing model's predictions) directly answers the sparsity question and is the cheapest test in the whole program, it should have run second or third, not eighth. Most of sections 6-9 and 11-12 are retrain-heavy proxies for the same question it answers directly, run before it rather than after. The truck_car_regroup detour (an old-project taxonomy idea, tested and reverted, not in this log) was the same mistake in a more expensive form: a full 200-epoch retrain plus a separability probe on an unreplicated hypothesis, before it was abandoned. Run the low-cost diagnostic before committing to an expensive one, not the reverse.
 
@@ -43,6 +43,10 @@ lr = 1e-5 × (128 / 32) = 4e-5
 This follows the linear scaling rule and avoids slowing training through both larger batches and a reduced learning rate.
 
 See `scripts/batch_size_selection.py`.
+
+**Post-merge recheck:** the miss-probability argument above predates decision 1's final resolution (bus merged into large_vehicle), which changes the class frequencies it was computed from - two_wheeler (7.0% of train) no longer needs bs=128 to stay under 10% miss probability the way bus (1.9%) did. Retested with `bs32` (`batch_size=32`, `lr=1e-5` per the linear scaling rule) against the merged-taxonomy `baseline`: macro F1 0.687 vs 0.686, every per-class delta within 0.005, both comfortably inside the 0.651-0.734 noise floor. `scripts/mlp_variants.py`'s `bs32`, results at `results/mlp/bs32/`.
+
+**Decision confirmed:** batch_size=128 isn't just theoretically justified anymore, an actual smaller-batch run shows no measurable difference either way, so there's no cost to keeping the larger, theoretically-motivated batch size.
 
 ## 2. Epoch count: no gain past roughly epoch 200
 
@@ -105,7 +109,9 @@ Retrained result: macro F1 0.709 vs `baseline`'s 0.686 (+0.023). This appears to
 
 **Side finding, a real caching bug:** `evaluate_val_metrics` cached its numeric metrics keyed only by file existence, not by whether the underlying model had changed. Retraining `deep10` in place with the fixed config left a stale `mlp_val_metrics.json` from the collapsed first attempt, silently reused, so the first "fixed" result reported was actually the failed run's numbers. Fixed by invalidating the cache whenever it's older than `mlp_model.pt`.
 
-**Open, not acted on:** the 64 histogram-bin features are all bounded [0,1], but `doppler_spread` is unnormalized (train range 0-59.2, mean 0.233), a scale mismatch at the input layer. Adam's per-parameter step size, and for `deep10`, BatchNorm right after the first layer, both likely blunt this, but it hasn't been tested directly (e.g. z-score standardizing `doppler_spread` on train stats).
+**Scale mismatch, tested: doesn't matter.** The 64 histogram-bin features are all bounded [0,1], but `doppler_spread` is unnormalized (train range 0-59.2, mean 0.233), a scale mismatch at the input layer. Tested directly with `standardized` (z-score standardizes `doppler_spread` on train-fit mean/std, applied unchanged to val/test): macro F1 0.688 vs `baseline`'s 0.686, every per-class delta within 0.004, inside the noise floor. `scripts/mlp_variants.py`'s `standardized`, results at `results/mlp/standardized/`.
+
+**Finding:** the scale mismatch is real but harmless here, consistent with the standing hypothesis that Adam's per-parameter adaptive step size already blunts it.
 
 ## 8. Feature design: point count (n_points scalar vs raw-count histogram)
 
