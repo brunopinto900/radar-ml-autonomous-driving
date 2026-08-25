@@ -6,6 +6,8 @@ EDA.md
 FEATURE_MAP_FINDINGS.md
 MLP_DESIGN.md
 MLP_FINDINGS.md
+MLP_Decisions_and_Findings_lengthy_one.md
+notebooks/mlp_ablations_lengthy_one.ipynb
 results/
 __pycache__/
 .ipynb_checkpoints/

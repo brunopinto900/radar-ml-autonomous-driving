@@ -35,7 +35,9 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     distance rather than two separate axis extents), azimuth_extent (instance's angular spread as
     seen by the sensor, max-min of azimuth_sc - a different physical quantity than spatial_extent,
     since a fixed-size object further away subtends a smaller angle, this folds in range-dependent
-    apparent size rather than raw Euclidean spread), and doppler_spread (per-instance median
+    apparent size rather than raw Euclidean spread), rcs_extent/range_extent (max-min of rcs/
+    range_sc per instance, same recipe as azimuth_extent applied to the other two point-level
+    columns not already covered by spatial_extent), and doppler_spread (per-instance median
     absolute deviation of vr_compensated). doppler_spread is the expensive part (~2-3 min at full
     scale, one Python lambda per instance group), so it's cached to disk keyed by sequence_name and
     reused if the cache covers the same sequences - same skip-if-covered pattern as
@@ -47,6 +49,8 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     df["radial"] = (df["x_rel"] ** 2 + df["y_rel"] ** 2) ** 0.5
     df["n_points"] = group["x_cc"].transform("size")
     df["azimuth_extent"] = group["azimuth_sc"].transform(lambda s: s.max() - s.min())
+    df["rcs_extent"] = group["rcs"].transform(lambda s: s.max() - s.min())
+    df["range_extent"] = group["range_sc"].transform(lambda s: s.max() - s.min())
     x_extent = group["x_cc"].transform(lambda s: s.max() - s.min())
     y_extent = group["y_cc"].transform(lambda s: s.max() - s.min())
     df["spatial_extent"] = (x_extent**2 + y_extent**2) ** 0.5

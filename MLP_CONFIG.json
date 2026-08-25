@@ -144,6 +144,31 @@
       "output_dir": "standardized",
       "standardize_extra": true,
       "run_kwargs": {}
+    },
+    "combined_features": {
+      "_note": "Final feature-design test before tagging v1.0: baseline's histograms plus every other feature tried across sections 5-13, added, not replacing anything. Histograms (16 bins each): rcs, vr_compensated, x_rel, y_rel (baseline's 4) plus range_sc, azimuth_sc (new). Unbinned scalars: doppler_spread (baseline's 1) plus n_points, azimuth_extent, spatial_extent, rcs_extent, range_extent (rcs_extent/range_extent new, same max-min-per-instance recipe as azimuth_extent). 102 dims total vs baseline's 65. Purely additive so it can't lose any signal baseline had; the question is whether stacking every previously-null-on-its-own feature together surfaces an interaction none of them showed individually. Expectation, going in: unlikely, per stat_descriptors (section 11) already combining a similar breadth of ideas and landing worse, not better, and the diagnosed ceiling (section 10, sparsity) isn't representational. If null, discard rather than write up.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "combined_features",
+      "features": ["rcs", "vr_compensated", "x_rel", "y_rel", "range_sc", "azimuth_sc"],
+      "extra_features": ["doppler_spread", "n_points", "azimuth_extent", "spatial_extent", "rcs_extent", "range_extent"],
+      "run_kwargs": {}
+    },
+    "rcs_extent_only": {
+      "_note": "Follow-up to combined_features's zero-out importance check (section 14a): rcs_extent alone was the second-most load-bearing addition (-0.045 macro F1 when zeroed) and had never been tested standalone before. Isolates it: baseline's own 4 histograms unchanged, extra_features adds only rcs_extent (max-min of rcs per instance) alongside doppler_spread. Tests whether this one feature alone reproduces a meaningful slice of combined_features's gain.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "rcs_extent_only",
+      "extra_features": ["doppler_spread", "rcs_extent"],
+      "run_kwargs": {}
+    },
+    "spatial_extent_added": {
+      "_note": "Follow-up to combined_features's zero-out importance check (section 14a): spatial_extent was the single most load-bearing addition (-0.080 macro F1 when zeroed), but section 9 only ever tested it as a replacement for x_rel/y_rel (null there, macro F1 0.690). This tests it as an addition instead: baseline's x_rel/y_rel histograms kept, spatial_extent appended alongside doppler_spread rather than swapped in for anything.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "spatial_extent_added",
+      "extra_features": ["doppler_spread", "spatial_extent"],
+      "run_kwargs": {}
     }
   }
 }
