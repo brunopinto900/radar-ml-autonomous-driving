@@ -1,22 +1,19 @@
 """Picks BATCH_SIZE (and a matching LEARNING_RATE) from the train split's actual class
-frequencies, instead of guessing. A batch of size bs misses a class entirely with probability
-(1-p)^bs (binomial P(zero successes) - each of the bs draws independently misses the class with
-probability 1-p), where p is that class's fraction of the training set. Rare classes
-(large_vehicle, bus, two_wheeler) are the ones that matter here - a batch that never sees `bus`
-contributes nothing to its weighted loss term that step.
+frequencies, rather than by manual selection.
 
-This picks the smallest batch size that gets every class's miss-probability under a threshold
-(rounded up to the next power of two, for GPU-friendly sizing), then scales the learning rate
-with it via the linear scaling rule (Goyal et al.: LR should grow with batch size, since a bigger
-batch means fewer, less noisy gradient updates per epoch - see the mlp_classifier.py batch-size
-discussion). BASE_BATCH_SIZE/BASE_LR is mlp_classifier.py's original hand-picked, empirically
-working config (Design_Decisions.md) - the scaling is anchored to a known-stable point, not
-derived from nothing.
+- A batch of size bs misses a class entirely with probability (1-p)^bs (binomial P(zero
+  successes)), p = that class's train fraction. Rare classes (large_vehicle, bus, two_wheeler)
+  are the binding constraint: a batch that never sees `bus` contributes nothing to its
+  weighted loss term that step.
+- Selects the smallest batch size keeping every class's miss probability under a threshold
+  (rounded up to the next power of two, for GPU-friendly sizing).
+- Scales the learning rate via the linear scaling rule (Goyal et al.: LR grows with batch
+  size, since a bigger batch means fewer, less noisy gradient updates per epoch), anchored to
+  BASE_BATCH_SIZE/BASE_LR, mlp_classifier.py's original hand-picked, empirically working
+  config (Design_Decisions.md).
 
-This is a diagnostic, not a training input: it prints a recommendation, it does not write to
-mlp_classifier.py's BATCH_SIZE/LEARNING_RATE MACROS itself - that stays a deliberate, reviewed
-edit.
-"""
+Diagnostic only: prints a recommendation, does not write mlp_classifier.py's
+BATCH_SIZE/LEARNING_RATE constants, that remains a deliberate, reviewed edit."""
 import math
 
 import pandas as pd
@@ -30,7 +27,7 @@ CANDIDATE_BATCH_SIZES = (16, 32, 64, 128, 256, 512)
 
 
 def train_class_frequencies(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES) -> pd.Series:
-    """Fraction of train-split instances belonging to each class (train only - val/test must
+    """Fraction of train-split instances belonging to each class (train only, val/test must
     never influence a hyperparameter choice, same discipline as the bin edges)."""
     splits = load_split()
     instances = df.drop_duplicates(["sequence_name", "timestamp", "track_id"])
@@ -40,12 +37,12 @@ def train_class_frequencies(df: pd.DataFrame, classes: list[str] = FINAL_CLASSES
 
 def miss_probability_table(freqs: pd.Series, batch_sizes: tuple[int, ...] = CANDIDATE_BATCH_SIZES) -> pd.DataFrame:
     """P(a batch of size bs contains zero examples of this class) = (1-p)^bs, for each
-    candidate batch size - the table that motivates the recommendation."""
+    candidate batch size, the table that motivates the recommendation."""
     return pd.DataFrame({bs: (1 - freqs) ** bs for bs in batch_sizes})
 
 
 def required_batch_size(freqs: pd.Series, target_p_zero: float = 0.10) -> int:
-    """Smallest batch size such that EVERY class's miss-probability is <= target_p_zero - driven
+    """Smallest batch size such that EVERY class's miss-probability is <= target_p_zero, driven
     by the rarest class, since it's the binding constraint. Solves (1-p)^bs <= target for bs,
     then rounds up to the next power of two (GPU-friendly, and a batch size no longer needs to
     be read as a precisely-tuned number)."""
@@ -64,7 +61,7 @@ def select_hyperparameters(
     df: pd.DataFrame, classes: list[str] = FINAL_CLASSES, target_p_zero: float = 0.10
 ) -> tuple[int, float]:
     """Prints the miss-probability table and the resulting (batch_size, lr) recommendation.
-    Returns (batch_size, lr) - does not write these anywhere; that's a deliberate manual edit to
+    Returns (batch_size, lr); does not write these anywhere, that's a deliberate manual edit to
     mlp_classifier.py's MACROS."""
     freqs = train_class_frequencies(df, classes)
     print(f"train-set class frequencies:\n{freqs.round(4).to_string()}\n")

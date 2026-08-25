@@ -1,23 +1,16 @@
-"""One off ablation that informed Design_Decisions.md decision 1's final resolution: does
-keeping bus separate from large_vehicle actually help the MLP, versus merging it in (the
-standing choice, mlp_variants.py's `baseline`), or splitting truck back out instead? Not meant
-to replace the LR/RF probe evidence, this is a downstream sanity check run through the same
+"""Ablation informing Design_Decisions.md decision 1: does merging bus into large_vehicle
+(mlp_variants.py's `baseline`) actually help the MLP, vs. keeping it separate or also
+splitting truck back out? Downstream sanity check on the LR/RF probe evidence, same
 architecture/training config as mlp_classifier.py's standing model.
 
-Two variants, defined in mlp_variants.py and run together here, both compared against the
-`baseline` (bus merged) variant:
+Variants (defined in mlp_variants.py), both compared against `baseline`:
+- `bus_separate`: original, pre-merge taxonomy (6 classes).
+- `truck_separate`: also undoes the truck merge, 3 separate vehicle classes (7 total);
+  retests decision 1's truck merge through the MLP instead of the LR/RF probe.
 
-    bus_separate: the original, pre-merge taxonomy (6 classes) - was bus actually better off on
-    its own?
-
-    truck_separate: undo the truck merge too, so large_vehicle/truck/bus are three separate
-    classes (7 classes). Re tests decision 1's original truck merge call, through the MLP
-    instead of the LR/RF probe.
-
-Both reuse the fixed sequence level split (results/data/sequence_split.json) unchanged, since
-relabeling instances doesn't touch which sequences are in which split, and both train with
-mlp_classifier's standing hyperparameters (N_BINS, HIDDEN_DIM, LEARNING_RATE, EPOCHS,
-BATCH_SIZE). Findings: MLP_Decisions_and_Findings.md section 4.
+Both reuse the fixed sequence-level split unchanged (relabeling doesn't affect split
+membership) and mlp_classifier's standing hyperparameters. Findings:
+MLP_Decisions_and_Findings.md section 4.
 """
 TAXONOMY_VARIANTS = ["bus_separate", "truck_separate"]
 

@@ -120,11 +120,9 @@ OBJECT_ATTRS = ["sensor_id", "range_sc", "azimuth_sc", "rcs", "vr", "vr_compensa
 
 
 def object_instance(detections: np.ndarray, track_id: bytes) -> dict:
-    """One tracked object's points + attributes + label, as a plain dict.
-
-    This is the Day-3 building block: {points, attributes, label} per labeled
-    object instance. Plotting functions are just views on top of this.
-    """
+    """One tracked object's points + attributes + label, as a plain dict: the
+    {points, attributes, label} unit per labeled object instance. Plotting functions are just
+    views on top of this."""
     points = object_detections(detections, track_id)
     label_id = int(points["label_id"][0])
     return {
@@ -273,7 +271,7 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
     xlim, ylim = axis_limits(detections)
     plot_scene(
         detections,
-        title=f"{sequence_name} - one radar scan - {scene_sensor}",
+        title=f"{sequence_name}, one radar scan, {scene_sensor}",
         path=scene_plot_path,
         image_path=scene_image_path(sequence_name, timestamp),
         xlim=xlim,
@@ -295,7 +293,7 @@ def inspect_scene(sequence_name: str, timestamp: int, track_id: bytes | None = N
 
     plot_object_attributes(
         obj,
-        title=f"{label_name} ({track_id.decode()[:8]}) - {len(obj)} points - {scene_sensor}",
+        title=f"{label_name} ({track_id.decode()[:8]}), {len(obj)} points, {scene_sensor}",
         path=object_attrs_path,
         xlim=xlim,
         ylim=ylim,

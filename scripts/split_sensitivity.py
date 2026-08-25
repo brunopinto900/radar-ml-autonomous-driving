@@ -1,23 +1,16 @@
-"""Checks how much the MLP's macro F1 depends on which valid split you happen to use, versus
-which split has the best-matching train/val feature distributions. Two steps: generate the
-handful of distinct valid splits at the fixed 70/15/15 proportions and score each by how well
-train and val's per-class feature distributions match (sequence_split.select_best_split), then
-train mlp_classifier's baseline config on every one of them - same classes/features/hyperparameters,
-only the split changes - and compare macro F1. Answers "is a metric difference of X real, or just
-normal split-to-split noise": see MLP_Decisions_and_Findings.md's split selection finding, macro F1
-ranged 0.651-0.734 across the 6 candidates, uncorrelated with distributional match, and the
-range_sc vs baseline gap (0.018) sits well inside that range.
+"""Establishes the noise floor: how much the MLP's macro F1 depends on split choice alone,
+vs. which split has the best-matching train/val feature distributions.
 
-`features`/`extra_features`/`normalize` (default None, mlp_classifier's own defaults) let a caller
-measure the noise floor for a different feature set instead of baseline's, e.g. spatial_extent -
-a feature designed to be orientation-robust could plausibly have a narrower noise floor than
-baseline's, if aspect-angle variation across sequences is really what drives it, and baseline's
-noise floor isn't automatically a valid reference for a different encoding. `output_subdir`
-(default "split_search") keeps a non-baseline feature set's results separate from baseline's.
+- Generates the distinct valid splits at fixed 70/15/15 proportions, scored by train/val
+  distributional match (sequence_split.select_best_split).
+- Trains mlp_classifier's baseline config on each (only the split changes) and compares macro
+  F1. Result: 0.651-0.734 across 6 candidates, uncorrelated with distributional match
+  (MLP_Decisions_and_Findings.md split selection finding).
+- `features`/`extra_features`/`normalize` (default: baseline's) measure the noise floor for a
+  different feature set, since a differently-encoded feature set isn't guaranteed to share
+  baseline's noise floor. `output_subdir` keeps results separate per feature set.
 
-Cached to results/mlp/<output_subdir>/fold_<n>/, same run_training/evaluate_val_metrics caching as
-every other mlp_classifier.py-based run - a repeat call skips retraining automatically.
-"""
+Cached to results/mlp/<output_subdir>/fold_<n>/, same caching as any mlp_classifier.py run."""
 import pandas as pd
 
 from feature_distributions import HISTOGRAM_FEATURES, MLP_CLASSES
@@ -37,9 +30,9 @@ def run_split_sensitivity(
     output_subdir: str = "split_search",
 ) -> pd.DataFrame:
     """Generates the distinct valid val splits (see select_best_split) and trains mlp_classifier's
-    config on each - baseline's by default, or a different feature set via `features`/
-    `extra_features`/`normalize`. Returns one row per fold with its distributional match score
-    (max_ks) and resulting macro F1."""
+    config on each, baseline's by default, or a different feature set via `features`/
+    `extra_features`/`normalize`. Returns one row per fold: distributional match score (max_ks)
+    and macro F1."""
     candidates = select_best_split(
         df, classes=MLP_CLASSES, features=HISTOGRAM_FEATURES, n_seeds=n_seeds, base_random_state=base_random_state
     ).drop_duplicates("fold").sort_values("fold")

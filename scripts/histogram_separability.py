@@ -1,12 +1,11 @@
-"""Day 5 (cont'd): decide the per-instance histogram encoding's bin count empirically, by
-running it through the same sequence-grouped LR+RF separability probe used for the taxonomy
-decision - not by eyeballing the pooled bin-sweep plots in feature_distributions.py. Point-level
-features average only ~2.9 points/instance (1,443,816 points / 503,759 instances), so "which
-plot looks best" doesn't reflect what a typical instance's histogram actually looks like; bin
-count is a hyperparameter of the encoding, scored the same way any other one is - via
-separability_probe.run_probe_cv's 5-fold-averaged AUC/precision/recall/f1 on the fixed split's
-train+val sequences (test excluded), not a single fold.
-"""
+"""Decides the per-instance histogram encoding's bin count empirically, via the same
+sequence-grouped LR+RF separability probe used for the taxonomy decision, not by visual
+inspection of the pooled bin-sweep plots in feature_distributions.py. Point-level features
+average only ~2.9 points/instance (1,443,816 points / 503,759 instances), so "which plot looks
+best" doesn't reflect what a typical instance's histogram actually looks like. Bin count is
+scored like any other hyperparameter, via separability_probe.run_probe_cv's 5-fold-averaged
+AUC/precision/recall/f1 on the fixed split's train+val sequences (test excluded), not a single
+fold."""
 import numpy as np
 import pandas as pd
 
@@ -24,23 +23,24 @@ def fit_bin_edges(
     df: pd.DataFrame, n_bins: int, features: list[str] = POINT_LEVEL_FEATURES, range_method: str = "percentile"
 ) -> dict[str, np.ndarray]:
     """Bin edges fit from `df` alone (pass a train-only df and reuse the returned edges for
-    val/test via build_histogram_features's `edges` param - bin boundaries are a fitted
-    preprocessing parameter, so refitting them per split would leak val/test's distribution into
-    where the bins fall). `range_method` picks how the edges are placed: "percentile" (default,
-    decision 2) and "gaussian" both split n_bins EQUAL-WIDTH bins across a clipped outer range,
-    [1st, 99th] percentile vs [mean - 2*std, mean + 2*std] - the two agree closely for a roughly
-    normal distribution but diverge for a skewed/heavy-tailed one, which is exactly what this
-    project's RCS/Doppler features look like, 2 std devs can clip a different (and
-    outlier-sensitive, since std itself is outlier-sensitive) fraction of the data than the
-    1st/99th percentile does. "quantile" is a different kind of change, not just a different
-    range but UNEQUAL-width bins: edges are placed so each bin holds roughly the same fraction of
-    training points (np.quantile at n_bins+1 evenly spaced probabilities over the full [0, 1]
-    range, no separate outlier clipping needed - the outermost bins naturally widen to absorb the
-    sparse tails). That gives more resolution where the data is actually dense and less where
-    it's sparse, instead of n_bins spent uniformly across the range regardless of where the points
-    are. Can produce duplicate/non-increasing edges if a feature has enough exactly-repeated
-    values concentrated at one quantile (not checked for here - watch for a degenerate/empty bin
-    if a feature turns out to be very spiky)."""
+    val/test via build_histogram_features's `edges` param, refitting per split would leak
+    val/test's distribution into where the bins fall). `range_method` picks how edges are
+    placed:
+
+    - `"percentile"` (default, decision 2) and `"gaussian"`: both split n_bins equal-width
+      bins across a clipped outer range, [1st, 99th] percentile vs. [mean-2std, mean+2std].
+      The two agree closely for a roughly normal distribution but diverge for a
+      skewed/heavy-tailed one (this project's RCS/Doppler features): 2 std devs can clip a
+      different, outlier-sensitive fraction of the data than the 1st/99th percentile does.
+    - `"quantile"`: unequal-width bins, edges placed so each bin holds roughly the same
+      fraction of training points (`np.quantile` at n_bins+1 evenly spaced probabilities, no
+      separate outlier clipping needed, the outermost bins widen to absorb the sparse tails).
+      Gives more resolution where the data is dense and less where it's sparse, instead of
+      n_bins spent uniformly regardless of point density.
+
+    Can produce duplicate/non-increasing edges if a feature has enough exactly-repeated values
+    concentrated at one quantile (not checked for here, watch for a degenerate/empty bin on a
+    very spiky feature)."""
     if range_method == "percentile":
         return {feature: np.linspace(df[feature].quantile(0.01), df[feature].quantile(0.99), n_bins + 1) for feature in features}
     if range_method == "gaussian":
@@ -64,20 +64,20 @@ def build_histogram_features(
     extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
     normalize: bool = True,
 ) -> pd.DataFrame:
-    """One row per instance: each point-level feature becomes n_bins columns holding, by
-    default (`normalize=True`), the fraction of that instance's own points landing in each bin -
-    fraction, not raw count, so a busy instance's histogram encodes distribution shape rather
-    than just point count. That normalization is exactly what makes point count irrecoverable
-    from the encoding (a 1-point and an N-point instance landing in the same bin are
-    indistinguishable) - `normalize=False` skips it and leaves raw per-bin counts, which
-    embeds point count back in implicitly (the bins for one feature sum to that instance's
-    n_points) at the cost of putting sparse and busy instances on different numeric scales for
-    the same underlying shape. `edges` (see fit_bin_edges), if given, are used as-is instead of
-    being recomputed from `df` - needed to encode val/test with edges fit on train only.
-    Otherwise edges are fit from `df` itself (fine when df is the only/whole pool being encoded,
-    e.g. the CV probes). `extra_features` (default doppler_spread) are appended unbinned, since
-    they're already one value per instance - pass [] to skip (e.g. a feature-swap variant that
-    bins everything)."""
+    """One row per instance: each point-level feature becomes n_bins columns.
+
+    - By default (`normalize=True`), each column holds the fraction of that instance's own
+      points landing in that bin, not raw count, so the histogram encodes distribution shape
+      rather than point count. This is exactly what makes point count irrecoverable from the
+      encoding (a 1-point and an N-point instance landing in the same bin are
+      indistinguishable). `normalize=False` leaves raw per-bin counts instead, implicitly
+      embedding point count (a feature's bins sum to that instance's n_points), at the cost of
+      putting sparse and busy instances on different numeric scales for the same shape.
+    - `edges` (see fit_bin_edges), if given, are used as-is rather than recomputed from `df`,
+      needed to encode val/test with edges fit on train only. Otherwise edges are fit from `df`
+      itself (fine when `df` is the whole pool being encoded, e.g. the CV probes).
+    - `extra_features` (default doppler_spread) are appended unbinned, already one value per
+      instance; pass `[]` to skip (e.g. a feature-swap variant that bins everything)."""
     df = df.loc[df["group"].isin(classes)]
     if edges is None:
         edges = fit_bin_edges(df, n_bins, features)
@@ -113,14 +113,14 @@ def build_stat_features(
 ) -> pd.DataFrame:
     """One row per instance: each point-level feature in `feature_stats` (e.g. {"rcs":
     ["mean","median","std"], "radial": ["std"]}) becomes one column per requested statistic,
-    aggregated directly from that instance's own points - no bin edges to fit, unlike
+    aggregated directly from that instance's own points. No bin edges to fit, unlike
     build_histogram_features, since each instance's mean/median/std depends only on its own
-    points, nothing to fit on train alone and reuse on val/test. "std" uses ddof=0 (population,
-    not sample) so a 1-point instance gets a well-defined 0 instead of NaN (ddof=1 divides by
-    n-1, undefined at n=1). `extra_features` (default doppler_spread) are appended as-is via
-    .first(), since they're already one value per instance, broadcast to every point row -
-    aggregating them the same way as a point-level feature would be degenerate (every point in an
-    instance shares the identical value, so e.g. std would always come out 0)."""
+    points, nothing to fit on train alone and reuse on val/test. `"std"` uses ddof=0
+    (population, not sample) so a 1-point instance gets a well-defined 0 instead of NaN (ddof=1
+    divides by n-1, undefined at n=1). `extra_features` (default doppler_spread) are appended
+    as-is via `.first()`, already one value per instance broadcast to every point row,
+    aggregating them like a point-level feature would be degenerate (every point in an instance
+    shares the identical value, so e.g. std would always be 0)."""
     df = df.loc[df["group"].isin(classes)]
     group = df.groupby(INSTANCE_COLS)
 
@@ -146,14 +146,13 @@ def run_bin_sweep(
 ) -> pd.DataFrame:
     """Builds histogram-encoded features at each candidate bin count and scores them with
     separability_probe.run_probe_cv's proper n_splits-fold averaging (mean +/- std), restricted
-    to the fixed split's train+val sequences (results/sequence_split.json - test stays untouched).
-    A single fold isn't trustworthy enough to rank bin counts against (see Design_Decisions.md
-    decision 3's "Confirmed with 5-fold CV" subsection - this replaced an earlier single-fold
-    version of this sweep). Cached to results/bin_sweep_results.parquet keyed by the exact
-    bin_counts requested (each bin count trains LR+RF n_splits times - this takes a while);
-    skips the sweep entirely if the cache already covers the same bin_counts. run_probe_cv prints
-    its own per-class mean+/-std table for every (bin_count, model); returns one summary row per
-    (bin_count, model)."""
+    to the fixed split's train+val sequences (test stays untouched). A single fold isn't
+    trustworthy enough to rank bin counts against (Design_Decisions.md decision 3's "Confirmed
+    with 5-fold CV" subsection). Cached to results/bin_sweep_results.parquet, keyed by the
+    exact bin_counts requested (each bin count trains LR+RF n_splits times, this takes a
+    while); skips the sweep entirely if the cache already covers the same bin_counts.
+    run_probe_cv prints its own per-class mean+/-std table for every (bin_count, model);
+    returns one summary row per (bin_count, model)."""
     from sequence_split import load_split
 
     splits = load_split()

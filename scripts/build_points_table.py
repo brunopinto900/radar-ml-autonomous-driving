@@ -1,15 +1,14 @@
-"""build the {points, attributes, label} dataset.
+"""Build the {points, attributes, label} dataset.
 
-One row = one radar point belonging to a tracked (dynamic) object. Instance
-identity (sequence_name, timestamp, track_id) is repeated on every point's row
-group by those three columns to recover one instance's point set. Output is a parquet file.
-"""
+One row = one radar point belonging to a tracked (dynamic) object. Instance identity
+(sequence_name, timestamp, track_id) is repeated on every point's row; group by those
+three columns to recover one instance's point set. Output is a parquet file."""
 import h5py
 import pandas as pd
 
 from dataloader import DATA_ROOT, LABELS, OBJECT_ATTRS, RESULTS_DIR
 
-SENSOR_ID = 2  # front-right corner radar (sensors.json: x=3.86, y=-0.7) - single sensor for now
+SENSOR_ID = 2  # front-right corner radar (sensors.json: x=3.86, y=-0.7), single sensor for now
 
 ALL_SEQUENCES = sorted(
     (p.name for p in DATA_ROOT.iterdir() if p.is_dir() and p.name.startswith("sequence_")),
@@ -39,7 +38,7 @@ def build_and_save_points_table(sequence_names: list[str] | None = None, table_p
     """Build the points table and save it as a parquet file. Returns the table.
 
     Skips rebuilding if table_path already exists AND covers exactly the requested
-    sequence_names - otherwise rebuilds (e.g. a cached full-158-sequence table won't be
+    sequence_names, otherwise rebuilds (e.g. a cached full-158-sequence table won't be
     silently returned for a request for just a couple of sequences)."""
     if sequence_names is None:
         sequence_names = ALL_SEQUENCES

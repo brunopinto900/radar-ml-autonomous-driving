@@ -1,15 +1,14 @@
-"""Day 6: baseline MLP on the histogram-encoded feature vector (Design_Decisions.md decision 6),
+"""Baseline MLP on the histogram-encoded feature vector (Design_Decisions.md decision 6),
 trained/evaluated on the fixed sequence-grouped split (decision 5). Bin edges are fit on train
-only and applied unchanged to val/test (see histogram_separability.fit_bin_edges) - unlike the
+only and applied unchanged to val/test (histogram_separability.fit_bin_edges), unlike the
 separability probes, which recomputed edges from whatever pool was passed in each time (a fine
-shortcut for a quick probe, wrong for the actual model: edges are a fitted preprocessing
+shortcut for a quick probe, wrong for the actual model, edges are a fitted preprocessing
 parameter, val/test must never influence them).
 
-Trains on train, tracks train/val loss+accuracy per epoch (NOT test - test is checked once, at
-the end, via evaluate_test, never watched during training/tuning). Caches the training history
-and model weights, keyed by the exact architecture/hyperparameter config, so a repeat call with
-the same config skips straight to the cached result.
-"""
+Trains on train, tracks train/val loss+accuracy per epoch (not test, which is checked once at
+the end via evaluate_test, never watched during training/tuning). Caches training history and
+model weights, keyed by the exact architecture/hyperparameter config, so a repeat call with
+the same config skips straight to the cached result."""
 import json
 
 import numpy as np
@@ -46,12 +45,12 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 class MLP(nn.Module):
     """`n_hidden_layers` Linear(+BatchNorm1d)+ReLU blocks (each hidden_dim wide, optionally
-    followed by Dropout(dropout) for regularization), then a final Linear mapping to one logit
-    per class. n_hidden_layers=2, dropout=0.0, batch_norm=False reproduces the original
-    3-linear-layer baseline exactly. batch_norm exists because a plain (unnormalized) stack of
-    10 Linear+ReLU+Dropout layers at hidden_dim=16 collapsed to predicting the majority class -
-    gradient signal degrading across depth with nothing to keep each layer's activations in a
-    well-scaled range (see MLP_Decisions_and_Findings.md's depth ablation)."""
+    followed by Dropout(dropout)), then a final Linear mapping to one logit per class.
+    n_hidden_layers=2, dropout=0.0, batch_norm=False reproduces the original 3-linear-layer
+    baseline exactly. batch_norm exists because a plain (unnormalized) stack of 10
+    Linear+ReLU+Dropout layers at hidden_dim=16 collapsed to predicting the majority class,
+    gradient signal degrading across depth with nothing keeping each layer's activations in a
+    well-scaled range (MLP_Decisions_and_Findings.md's depth ablation)."""
 
     def __init__(
         self,
@@ -102,30 +101,35 @@ def prepare_split_features(
     standardize_extra: bool = False,
 ):
     """Fits bin edges on the train split only, then encodes train/val/test with those same
-    edges. `classes` (default MLP_CLASSES) lets a caller encode a different class taxonomy
-    against the same fixed, sequence level split (see mlp_variants.py). `features` (default
-    POINT_LEVEL_FEATURES) are binned into `n_bins` columns each; `extra_features` (default
-    doppler_spread) are appended unbinned - a caller can swap doppler_spread for another
-    point-level feature by moving it into `features` and passing extra_features=[] instead (see
-    mlp_variants.py's "range_sc" variant). `normalize` (default True) controls whether each
-    feature's bins hold the fraction of the instance's points landing there (the default) or raw
-    counts (see histogram_separability.build_histogram_features) - raw counts embed point count
-    back into the encoding implicitly, at the cost of putting sparse/busy instances on different
-    scales. `bin_range` (default "percentile") picks how each feature's outer bin range is
-    determined before splitting into `n_bins` equal-width bins - see
-    histogram_separability.fit_bin_edges for "percentile" vs "gaussian" ([mean-2std, mean+2std]).
-    `feature_stats` (default None) replaces the histogram encoding entirely with explicit
-    per-instance statistics (see histogram_separability.build_stat_features), e.g. {"rcs":
-    ["mean","median","std"], "radial": ["std"]} - when set, `n_bins`/`features`/`normalize`/
-    `bin_range` are unused, since there are no bin edges to fit (each instance's stats depend only
-    on its own points). `standardize_extra` (default False) z-score standardizes (train-fit
-    mean/std, applied unchanged to val/test, same fit-on-train-only discipline as the bin edges)
-    whichever columns aren't already bounded [0,1] fractions: in histogram mode that's just
-    `extra_features` (e.g. `doppler_spread`, train range 0-59.2 vs the bin columns' [0,1]), in
-    feature_stats mode it's every column, since none of them are fraction bins to begin with.
-    `splits` (default None) uses the project's standing fixed split (load_split()) - pass an
-    explicit {"train"/"val"/"test": [sequence_name, ...]} dict instead to evaluate a different
-    candidate split (see sequence_split.select_best_split), without touching the standing one.
+    edges.
+
+    - `classes` (default MLP_CLASSES): encode a different class taxonomy against the same
+      fixed, sequence-level split (see mlp_variants.py).
+    - `features` (default POINT_LEVEL_FEATURES): binned into `n_bins` columns each.
+    - `extra_features` (default doppler_spread): appended unbinned. Swap doppler_spread for
+      another point-level feature by moving it into `features` and passing `extra_features=[]`
+      (see mlp_variants.py's "range_sc" variant).
+    - `normalize` (default True): each feature's bins hold the fraction of the instance's
+      points landing there (default) or raw counts (histogram_separability.
+      build_histogram_features), raw counts embed point count back into the encoding
+      implicitly, at the cost of putting sparse/busy instances on different scales.
+    - `bin_range` (default "percentile"): how each feature's outer bin range is determined
+      before splitting into `n_bins` equal-width bins, see histogram_separability.fit_bin_edges
+      for "percentile" vs "gaussian" ([mean-2std, mean+2std]).
+    - `feature_stats` (default None): replaces the histogram encoding entirely with explicit
+      per-instance statistics (histogram_separability.build_stat_features), e.g. {"rcs":
+      ["mean","median","std"], "radial": ["std"]}. When set, `n_bins`/`features`/`normalize`/
+      `bin_range` are unused, there are no bin edges to fit since each instance's stats depend
+      only on its own points.
+    - `standardize_extra` (default False): z-score standardizes (train-fit mean/std, applied
+      unchanged to val/test, same fit-on-train-only discipline as the bin edges) whichever
+      columns aren't already bounded [0,1] fractions: in histogram mode that's just
+      `extra_features` (e.g. `doppler_spread`, train range 0-59.2 vs. the bin columns' [0,1]);
+      in feature_stats mode it's every column, none of them are fraction bins to begin with.
+    - `splits` (default None): uses the project's standing fixed split (load_split()). Pass an
+      explicit {"train"/"val"/"test": [sequence_name, ...]} dict to evaluate a different
+      candidate split (sequence_split.select_best_split) without touching the standing one.
+
     Returns (X_train, y_train, X_val, y_val, X_test, y_test, feature_cols) as numpy arrays. X
     float32, y integer class indices in `classes` order."""
     class_to_idx = {cls: i for i, cls in enumerate(classes)}
@@ -188,9 +192,9 @@ def train_mlp(
     batch_norm: bool = False,
 ):
     """Trains the MLP with Adam, class-count-weighted cross-entropy. `classes` (default
-    MLP_CLASSES) is the class list y_train/y_val's integer labels index into. `n_hidden_layers`/
-    `dropout`/`weight_decay`/`batch_norm` default to 2/0.0/0.0/False, reproducing the original
-    2-hidden-layer, no-regularization baseline exactly."""
+    MLP_CLASSES) is the class list y_train/y_val's integer labels index into.
+    `n_hidden_layers`/`dropout`/`weight_decay`/`batch_norm` default to 2/0.0/0.0/False,
+    reproducing the original 2-hidden-layer, no-regularization baseline exactly."""
     torch.manual_seed(random_state)
 
     weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
@@ -273,21 +277,25 @@ def evaluate_val_metrics(
     dropout: float = 0.0,
     batch_norm: bool = False,
 ):
-    """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached trained
-    model in `output_dir` - never retrains, only loads. `classes`/`hidden_dim`/`n_hidden_layers`/
-    `dropout`/`batch_norm` (default MLP_CLASSES/HIDDEN_DIM/2/0.0/False) must match what the cached
-    model at `output_dir` was trained with, so the reconstructed architecture matches the saved
-    weights (weight_decay is optimizer-only, doesn't affect architecture, so isn't needed here).
-    Rebuilding val's feature
-    vectors (bin edges fit on train, applied to val) and running one forward pass is cheap either
-    way (not training), so it's redone each call; only the actual training step is skipped, via
-    the model cache. Uses val, not test, for the same reason the training curves did - test stays
-    untouched until a deliberate one-time check. Numeric metrics are cached to
-    output_dir/mlp_val_metrics.json, reused only if that file is at least as new as model.pt -
-    otherwise a retrained model in the same output_dir would silently serve stale metrics from
-    whatever was trained there before. The confusion matrix and bar plots are always regenerated
-    fresh from the loaded model - cheap either way. Returns (metrics_df, confusion_matrix_fig,
-    bar_fig)."""
+    """Per-class precision/recall/f1 + confusion matrix on val, computed from the cached
+    trained model in `output_dir`, never retrains, only loads.
+
+    - `classes`/`hidden_dim`/`n_hidden_layers`/`dropout`/`batch_norm` (default
+      MLP_CLASSES/HIDDEN_DIM/2/0.0/False) must match what the cached model at `output_dir` was
+      trained with, so the reconstructed architecture matches the saved weights (weight_decay
+      is optimizer-only and isn't needed here, it doesn't affect architecture).
+    - Rebuilding val's feature vectors (bin edges fit on train, applied to val) and running one
+      forward pass is cheap regardless (not training), so it's redone each call; only the
+      actual training step is skipped, via the model cache.
+    - Uses val, not test, for the same reason the training curves did, test stays untouched
+      until a deliberate one-time check.
+    - Numeric metrics are cached to output_dir/mlp_val_metrics.json, reused only if that file
+      is at least as new as model.pt, otherwise a retrained model in the same output_dir would
+      silently serve stale metrics from whatever was trained there before.
+    - Confusion matrix and bar plots are always regenerated fresh from the loaded model, cheap
+      regardless.
+
+    Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
     model_cache = output_dir / MODEL_FILENAME
@@ -296,7 +304,7 @@ def evaluate_val_metrics(
     metrics_bar_path = output_dir / METRICS_BAR_FILENAME
 
     if not model_cache.exists():
-        raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
+        raise FileNotFoundError(f"{model_cache} doesn't exist, run run_training() first")
 
     _, _, X_val, y_val, _, _, _ = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
@@ -334,7 +342,7 @@ def evaluate_val_metrics(
     cm = confusion_matrix(y_val, y_pred, labels=range(len(classes)), normalize="true")
     fig, ax = plt.subplots(figsize=(7, 6))
     ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
-    ax.set_title("MLP - val confusion matrix (row-normalized)")
+    ax.set_title("MLP: val confusion matrix (row-normalized)")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     fig.tight_layout()
 
@@ -346,7 +354,7 @@ def evaluate_val_metrics(
     metrics_df[["precision", "recall", "f1"]].plot(kind="bar", ax=bar_ax, edgecolor="k")
     bar_ax.set_ylim(0, 1)
     bar_ax.set_ylabel("score")
-    bar_ax.set_title("MLP - per-class precision/recall/f1 (val)")
+    bar_ax.set_title("MLP: per-class precision/recall/f1 (val)")
     bar_ax.legend(loc="lower right")
     plt.setp(bar_ax.get_xticklabels(), rotation=45, ha="right")
     bar_fig.tight_layout()
@@ -376,34 +384,34 @@ def evaluate_by_point_count(
     """Buckets val predictions from the cached model in `output_dir` by instance point count
     (n_points) and reports per-bucket support, accuracy, macro F1, and per-class F1 + support
     (support_<class> is that class's true instance count within the bucket, not a prediction
-    count - it's what makes a per-class F1 like `f1_pedestrian=0.000` at the sparsest/densest
+    count, it's what makes a per-class F1 like `f1_pedestrian=0.000` at the sparsest/densest
     buckets legible as "zero real instances there" rather than "the model failed"). Answers a
     different question than the n_points/raw_counts feature tests (section 8): those asked
     whether handing the network point count as an input helps; this asks whether point count
-    itself, independent of any feature, explains why error is high - i.e. is sparsity a real
+    itself, independent of any feature, explains why error is high, i.e. is sparsity a real
     driver of the ceiling, checked directly against the model's actual predictions rather than
-    inferred from six null feature-design results. Never retrains, only loads (same cached model
-    `evaluate_val_metrics` uses). `bins` (default 1/2/3/4/5/6-10/11+) sets the bucket edges,
-    passed to `pandas.cut` with `bins=(0, *bins)`.
+    inferred from six null feature-design results. Never retrains, only loads (same cached
+    model `evaluate_val_metrics` uses). `bins` (default 1/2/3/4/5/6-10/11+) sets the bucket
+    edges, passed to `pandas.cut` with `bins=(0, *bins)`.
 
     n_points isn't necessarily part of `features`/`extra_features` (it isn't for baseline), so
-    it's fetched via a second, separate call to prepare_split_features with n_points appended to
-    extra_features, always with standardize_extra=False regardless of what the model itself was
-    trained with - n_points here is the bucketing key, not a model input, so it must stay in raw
-    units. The model's own input vector comes from a first, separate call using the real
+    it's fetched via a second, separate call to prepare_split_features with n_points appended
+    to extra_features, always with standardize_extra=False regardless of what the model itself
+    was trained with, n_points here is the bucketing key, not a model input, so it must stay in
+    raw units. The model's own input vector comes from a first, separate call using the real
     features/extra_features/standardize_extra, so the two never interfere."""
     from sklearn.metrics import f1_score, precision_recall_fscore_support
 
     model_cache = output_dir / MODEL_FILENAME
     if not model_cache.exists():
-        raise FileNotFoundError(f"{model_cache} doesn't exist - run run_training() first")
+        raise FileNotFoundError(f"{model_cache} doesn't exist, run run_training() first")
 
     _, _, X_model, y_val, _, _, _ = prepare_split_features(
         df, classes=classes, features=features, extra_features=extra_features, splits=splits,
         feature_stats=feature_stats, bin_range=bin_range, standardize_extra=standardize_extra,
     )
 
-    # n_points is fetched separately, always unstandardized - it's the bucketing key, not a model
+    # n_points is fetched separately, always unstandardized, it's the bucketing key, not a model
     # input, so standardize_extra (if set) must not touch it regardless of what the model itself
     # was trained on
     raw_extra_features = extra_features if "n_points" in extra_features else [*extra_features, "n_points"]
@@ -449,11 +457,11 @@ def evaluate_by_point_count(
 
 
 def format_point_count_deltas(summary: pd.DataFrame) -> pd.DataFrame:
-    """Reformats evaluate_by_point_count's summary for a table where the reader cares how much
-    each metric moves off the sparsest bucket, not just its raw value: every value except the
-    first bucket (n_points=1, the baseline row) is shown as "value (+/-delta)", delta always
-    relative to that first bucket. `n` and `support_<class>` (sample sizes) are left as plain
-    integers, they're counts, not quality metrics that should carry a delta."""
+    """Reformats evaluate_by_point_count's summary to show each metric's change off the
+    sparsest bucket, not just its raw value: every value except the first bucket (n_points=1,
+    the baseline row) is shown as "value (+/-delta)", delta always relative to that first
+    bucket. `n` and `support_<class>` (sample sizes) are left as plain integers, counts rather
+    than quality metrics that should carry a delta."""
     plain_cols = [c for c in summary.columns if c == "n" or c.startswith("support_")]
     value_cols = [c for c in summary.columns if c not in plain_cols]
     baseline = summary.iloc[0]
@@ -469,10 +477,10 @@ def format_point_count_deltas(summary: pd.DataFrame) -> pd.DataFrame:
 
 
 def plot_point_count_curve(summary: pd.DataFrame, classes: list[str] = MLP_CLASSES, output_dir=MLP_DIR):
-    """Plots evaluate_by_point_count's summary as one curve per class (accuracy and macro F1
-    included as dashed reference lines), point count bucket on the x-axis - overlaying every class
-    on one plot reads faster than the raw table, especially for spotting which classes rise/fall
-    together vs which stay flat."""
+    """Plots evaluate_by_point_count's summary as one curve per class (accuracy and macro F1 as
+    dashed reference lines), point count bucket on the x-axis. Overlaying every class on one
+    plot reads faster than the raw table, especially for spotting which classes rise/fall
+    together vs. which stay flat."""
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -486,7 +494,7 @@ def plot_point_count_curve(summary: pd.DataFrame, classes: list[str] = MLP_CLASS
     ax.set_ylim(0, 1)
     ax.set_xlabel("instance point count (bucket)")
     ax.set_ylabel("score")
-    ax.set_title("MLP - val performance by instance point count")
+    ax.set_title("MLP: val performance by instance point count")
     ax.legend(loc="center right", fontsize=8)
     fig.tight_layout()
 
@@ -547,21 +555,25 @@ def run_training(
     batch_norm: bool = False,
 ):
     """Builds train/val/test from the fixed split, trains (or loads from cache if this exact
-    config was already run), plots train-vs-val curves. `classes` (default MLP_CLASSES) lets a
-    caller train on a different class taxonomy against the same fixed split (see
-    mlp_variants.py); `features`/`extra_features`/`normalize`/`feature_stats`/`bin_range`/
-    `standardize_extra` (see prepare_split_features) let a caller swap the feature set or encoding
-    instead, e.g. binning range_sc in place of doppler_spread, raw per-bin counts instead of
-    fractions, explicit per-instance statistics instead of histograms entirely, a mean/std-based
-    bin range instead of percentile-based, or z-score standardizing the non-fraction columns;
-    `splits` lets a caller evaluate a different candidate split instead of the standing fixed one
-    (see sequence_split.select_best_split); `hidden_dim`/`n_hidden_layers` let a caller change
-    model capacity (width/depth); `dropout`/`weight_decay`/`batch_norm` add
-    regularization/stabilization (default 0.0/0.0/False, off, reproducing the original baseline).
-    Writes to `output_dir` (default MLP_DIR) - pass a different directory (e.g. MLP_DIR /
+    config was already run), plots train-vs-val curves.
+
+    - `classes` (default MLP_CLASSES): train on a different class taxonomy against the same
+      fixed split (see mlp_variants.py).
+    - `features`/`extra_features`/`normalize`/`feature_stats`/`bin_range`/`standardize_extra`
+      (see prepare_split_features): swap the feature set or encoding, e.g. binning range_sc in
+      place of doppler_spread, raw per-bin counts instead of fractions, explicit per-instance
+      statistics instead of histograms entirely, a mean/std-based bin range instead of
+      percentile-based, or z-score standardizing the non-fraction columns.
+    - `splits`: evaluate a different candidate split instead of the standing fixed one
+      (sequence_split.select_best_split).
+    - `hidden_dim`/`n_hidden_layers`: change model capacity (width/depth).
+    - `dropout`/`weight_decay`/`batch_norm`: add regularization/stabilization (default
+      0.0/0.0/False, off, reproducing the original baseline).
+
+    Writes to `output_dir` (default MLP_DIR), pass a different directory (e.g. MLP_DIR /
     f"epochs_{epochs}") to keep a run's cache separate from the default baseline instead of
-    overwriting it. Returns (model, history, X_test, y_test) - X_test/y_test are returned but NOT
-    evaluated here; call evaluate_test explicitly once."""
+    overwriting it. Returns (model, history, X_test, y_test), X_test/y_test are returned but
+    not evaluated here; call evaluate_test explicitly once."""
     cache_key = {
         "n_bins": N_BINS, "bin_range": bin_range, "feature_stats": feature_stats,
         "standardize_extra": standardize_extra, "hidden_dim": hidden_dim,

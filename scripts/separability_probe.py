@@ -1,8 +1,7 @@
 """Generic class-separability probe: class-count-weighted logistic regression + random forest
-on a sequence-grouped held-out split, with per-class one-vs-rest and pairwise ROC-AUC. Feature-
-set agnostic - callers (taxonomy_separability.py, histogram_separability.py) build their own per-instance
-feature matrix and hand it to run_probe.
-"""
+on a sequence-grouped held-out split, with per-class one-vs-rest and pairwise ROC-AUC.
+Feature-set agnostic, callers (taxonomy_separability.py, histogram_separability.py) build
+their own per-instance feature matrix and hand it to run_probe."""
 from itertools import combinations
 
 import matplotlib.pyplot as plt
@@ -24,7 +23,7 @@ from dataloader import RESULTS_DIR
 
 
 def class_weights(labels: pd.Series) -> dict[str, float]:
-    """weight_i = (largest class's count) / (class i's count) - the biggest class gets
+    """weight_i = (largest class's count) / (class i's count): the biggest class gets
     weight 1, a class with 1/10th its count gets weight 10."""
     counts = labels.value_counts()
     return (counts.max() / counts).to_dict()
@@ -32,7 +31,7 @@ def class_weights(labels: pd.Series) -> dict[str, float]:
 
 def per_class_auc(y_true, y_proba: np.ndarray, class_labels: np.ndarray) -> dict:
     """One-vs-rest ROC-AUC per class. roc_auc_score's multi_class="ovr" path requires >=3
-    classes - for exactly 2 it raises ("y should be a 1d array"), since sklearn expects a plain
+    classes; for exactly 2 it raises ("y should be a 1d array"), since sklearn expects a plain
     1d score for binary. Handled directly here: for 2 classes, AUC is the same value from either
     class's perspective (rank order and positive/negative flip together), so one binary
     roc_auc_score call covers both."""
@@ -74,29 +73,32 @@ def run_probe(
     results_dir=RESULTS_DIR,
 ) -> dict:
     """Sequence-grouped split (StratifiedGroupKFold on `groups`, e.g. sequence_name, ~1/n_splits
-    held out - instances from the same sequence share background/weather/vehicle, so an
-    instance-level split would leak sequence-specific signal into "held-out" test data) with
+    held out, instances from the same sequence share background/weather/vehicle, so an
+    instance-level split would leak sequence-specific signal into "held-out" test data), with
     leakage asserts, then class-count-weighted LogisticRegression + RandomForestClassifier,
-    per-class one-vs-rest ROC-AUC. `verbose` gates the classification_report / pairwise-AUC
-    prints - off for sweeps over many configurations where per-run detail is just noise.
-    `save_confusion` gates the row-normalized confusion matrix plot, saved to
-    {results_dir}/{tag}_confusion_matrix_<model>.png (results_dir defaults to the results/ root,
-    callers with their own subfolder - e.g. results/taxonomy/ - should pass it explicitly). High
-    AUC does not imply good precision/recall - AUC is threshold-independent, but class weighting
-    shifts the actual argmax decision boundary, so `metrics_per_class` (precision/recall/f1/
-    support at that operating point, from
-    precision_recall_fscore_support) is returned alongside auc_per_class rather than assuming
-    one implies the other. Returns {model_name: (report, auc_per_class, metrics_per_class,
-    fig_or_None)}."""
+    per-class one-vs-rest ROC-AUC.
+
+    - `verbose` gates the classification_report / pairwise-AUC prints, off for sweeps over many
+      configurations where per-run detail is noise.
+    - `save_confusion` gates the row-normalized confusion matrix plot, saved to
+      {results_dir}/{tag}_confusion_matrix_<model>.png (results_dir defaults to the results/
+      root; callers with their own subfolder, e.g. results/taxonomy/, should pass it
+      explicitly).
+    - High AUC does not imply good precision/recall: AUC is threshold-independent, but class
+      weighting shifts the actual argmax decision boundary, so `metrics_per_class`
+      (precision/recall/f1/support at that operating point) is returned alongside
+      `auc_per_class` rather than assuming one implies the other.
+
+    Returns {model_name: (report, auc_per_class, metrics_per_class, fig_or_None)}."""
     splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     train_idx, test_idx = next(splitter.split(X, y, groups))
     X_train, X_test = X[train_idx], X[test_idx]
     y_train, y_test = y[train_idx], y[test_idx]
 
     assert set(y_train) == set(classes) and set(y_test) == set(classes), (
-        "sequence-grouped split dropped a class from train or test - try a different random_state"
+        "sequence-grouped split dropped a class from train or test, try a different random_state"
     )
-    assert not set(groups[train_idx]) & set(groups[test_idx]), "train/test share a sequence - split is leaking"
+    assert not set(groups[train_idx]) & set(groups[test_idx]), "train/test share a sequence, split is leaking"
 
     scaler = StandardScaler().fit(X_train)
     X_train_scaled = scaler.transform(X_train)
@@ -152,7 +154,7 @@ def run_probe(
             cm = confusion_matrix(y_test, y_pred, labels=classes, normalize="true")
             fig, ax = plt.subplots(figsize=(7, 5.5))
             ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
-            ax.set_title(f"{tag} - {name}\n(sequence-grouped held-out, row-normalized)")
+            ax.set_title(f"{tag}: {name}\n(sequence-grouped held-out, row-normalized)")
             fig.tight_layout()
 
             results_dir.mkdir(parents=True, exist_ok=True)
@@ -174,14 +176,14 @@ def run_probe_cv(
     n_splits: int = 5,
     random_state: int = 0,
 ) -> dict:
-    """Like run_probe, but actually uses all n_splits folds instead of just the first, training
-    fresh on each fold's 4/5 and evaluating on its 1/5, then reporting mean +/- std across folds.
-    A single fold's AUC/F1 is noisy - see Design_Decisions.md decision 5's bus example, where a
-    small class's F1 swung around between adjacent bin counts on one fold alone - so a number
-    that's actually being compared or reported (rather than a quick default pick) should come
-    from here, not run_probe. No confusion matrix/report text (those need one fixed split to
-    display); prints and returns {model_name: {metric: {class: {"mean":.., "std":..}}}} for
-    metric in ("auc", "precision", "recall", "f1")."""
+    """Like run_probe, but uses all n_splits folds instead of just the first, training fresh on
+    each fold's 4/5 and evaluating on its 1/5, then reporting mean +/- std across folds. A
+    single fold's AUC/F1 is noisy (Design_Decisions.md decision 5's bus example: a small
+    class's F1 swung between adjacent bin counts on one fold alone), so any number being
+    compared or reported, not just a quick default pick, should come from here rather than
+    run_probe. No confusion matrix/report text (those need one fixed split to display); prints
+    and returns {model_name: {metric: {class: {"mean":.., "std":..}}}} for metric in ("auc",
+    "precision", "recall", "f1")."""
     splitter = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     model_names = ("logistic_regression", "random_forest")
     fold_scores = {name: {"auc": [], "precision": [], "recall": [], "f1": []} for name in model_names}

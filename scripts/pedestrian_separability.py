@@ -1,10 +1,11 @@
-"""pedestrian / two_wheeler confusion check: point-level azimuth x RCS scatter, plus the
-separability_probe run twice, restricted to sparse instances (n_points <= SPARSE_MAX) and to
-denser ones (n_points >= DENSE_MIN) - checks whether their confusion is capped by sparsity (same
-mechanism as section 10's point-count finding) or persists even with more points to work with.
-Diagnostic only, no MLP retraining - reuses taxonomy_separability's add_relative_features/
-PROBE_FEATURES and separability_probe's run_probe.
-"""
+"""pedestrian/two_wheeler confusion check:
+- point-level azimuth x RCS scatter.
+- separability_probe run twice, on sparse (n_points <= SPARSE_MAX) and dense
+  (n_points >= DENSE_MIN) instances, checking whether the confusion is capped by sparsity
+  (same mechanism as section 10's point-count finding) or persists regardless.
+
+Diagnostic only, no MLP retraining, reuses taxonomy_separability's add_relative_features/
+PROBE_FEATURES and separability_probe's run_probe."""
 import matplotlib.pyplot as plt
 import pandas as pd
 
@@ -23,7 +24,7 @@ DENSE_MIN = 5
 
 def _final_classes(df: pd.DataFrame) -> pd.DataFrame:
     """two_wheeler isn't a raw label_name (it's bicycle/motorized_two_wheeler merged, per
-    dataloader.MLP_CLASS_GROUPS) - map to the final training class and swap it in as label_name
+    dataloader.MLP_CLASS_GROUPS), maps to the final training class and swaps it in as label_name
     so the rest of this module (and taxonomy_separability's helpers, which key off label_name)
     doesn't need to know the difference."""
     df = apply_mlp_class_groups(df)
@@ -43,7 +44,7 @@ def plot_azimuth_rcs_scatter(df: pd.DataFrame, classes: list[str] = CONFUSION_CL
         ax.scatter(s["azimuth_sc"], s["rcs"], s=4, alpha=0.3, color=NAME_TO_COLOR[cls], label=cls)
     ax.set_xlabel("azimuth_sc [rad]")
     ax.set_ylabel("rcs [dBsm]")
-    ax.set_title("pedestrian vs two_wheeler - point-level azimuth x RCS")
+    ax.set_title("pedestrian vs two_wheeler: point-level azimuth x RCS")
     ax.legend(markerscale=4)
     fig.tight_layout()
 
@@ -84,7 +85,7 @@ def run_sparse_regime_probe(
 ):
     """run_probe on PROBE_FEATURES, once for n_points <= SPARSE_MAX and once for
     n_points >= DENSE_MIN. Prints class counts per regime before each probe (small regimes can
-    starve StratifiedGroupKFold of a class in some folds - worth seeing directly, not just
+    starve StratifiedGroupKFold of a class in some folds, worth seeing directly, not just
     inferring from a failure)."""
     features = build_instance_features(df, classes)
 
@@ -118,7 +119,7 @@ def run_sparse_regime_probe(
 def summarize_probe_results(results: dict) -> pd.DataFrame:
     """Compact regime x model table from run_sparse_regime_probe's output: macro F1 (mean of
     per-class f1 in metrics_per_class) and pairwise AUC (same value for both classes in binary
-    classification, per separability_probe.per_class_auc - only one needs showing)."""
+    classification, per separability_probe.per_class_auc, only one needs showing)."""
     rows = []
     for regime, models in results.items():
         for model_name, (_report, auc_per_class, metrics_per_class, _fig) in models.items():

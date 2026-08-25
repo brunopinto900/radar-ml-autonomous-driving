@@ -1,13 +1,12 @@
-"""Loads and resolves MLP_CONFIG.json (project root) into MLP_VARIANTS, run or load a variant by
-name instead of hand assembling classes/class_groups/output_dir per call. See MLP_CONFIG.json's
-own "_comment"/"_note" fields for what each variant is and why - this module only resolves the
-config into runnable form, it isn't the place to read variant descriptions anymore.
+"""Loads and resolves MLP_CONFIG.json (project root) into MLP_VARIANTS: run or load a variant
+by name instead of manually assembling classes/class_groups/output_dir per call. See
+MLP_CONFIG.json's own "_comment"/"_note" fields for what each variant is and why, this module
+only resolves the config, it isn't the source for variant descriptions.
 
 Resolution: each entry's "class_groups_base" (CLASS_GROUPS or MLP_CLASS_GROUPS, dataloader.py's
-real taxonomy dicts) is merged with its optional "class_groups_overrides" - the mapping itself is
-never duplicated in the JSON, only referenced by name, so it always has exactly one source of
-truth. "output_dir" is relative to MLP_DIR (results/mlp/); null means MLP_DIR itself.
-"""
+real taxonomy dicts) is merged with its optional "class_groups_overrides", the mapping itself
+is never duplicated in the JSON, only referenced by name. "output_dir" is relative to MLP_DIR
+(results/mlp/); null means MLP_DIR itself."""
 import json
 from pathlib import Path
 
@@ -53,16 +52,18 @@ def build_variant_df(raw_df, variant: str):
 
 def run_variant(raw_df, variant: str):
     """Trains (or loads from cache) and evaluates val metrics for the named variant. See
-    MLP_CONFIG.json for what's available. A variant may optionally set "features"/"extra_features"/
-    "normalize"/"feature_stats" to swap the feature set or encoding instead of (or alongside) the
-    taxonomy/hyperparameters - falls back to mlp_classifier.py's own defaults
-    (POINT_LEVEL_FEATURES / doppler_spread / fraction-normalized bins) if absent. These reach both
-    run_training and evaluate_val_metrics, since evaluating a cached model on features built a
-    different way than it was trained on would silently produce garbage. Architecture kwargs
-    ("hidden_dim"/"n_hidden_layers"/"dropout"/"batch_norm"), if set in "run_kwargs", also have to
-    reach evaluate_val_metrics (not just run_training), since reloading the cached model needs to
-    reconstruct the exact same architecture ("weight_decay" is optimizer-only, doesn't affect
-    architecture, so it's excluded). Returns (model, history, metrics_df, cm_fig, bar_fig)."""
+    MLP_CONFIG.json for what's available.
+
+    - "features"/"extra_features"/"normalize"/"feature_stats" optionally swap the feature set
+      or encoding; falls back to mlp_classifier.py's own defaults if absent. These reach both
+      run_training and evaluate_val_metrics, evaluating a cached model on differently-built
+      features would silently produce invalid results.
+    - Architecture kwargs ("hidden_dim"/"n_hidden_layers"/"dropout"/"batch_norm"), if set in
+      "run_kwargs", also reach evaluate_val_metrics, not just run_training, since reloading the
+      cached model requires reconstructing the same architecture ("weight_decay" is
+      optimizer-only and excluded, it doesn't affect architecture).
+
+    Returns (model, history, metrics_df, cm_fig, bar_fig)."""
     config = MLP_VARIANTS[variant]
     df = build_variant_df(raw_df, variant)
     feature_kwargs = {

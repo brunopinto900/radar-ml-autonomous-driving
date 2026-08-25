@@ -19,29 +19,34 @@ DOPPLER_SPREAD_CACHE = RESULTS_DIR / "data" / "doppler_spread_cache.parquet"
 
 
 def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add x_rel/y_rel (point position relative to its instance's centroid, mean-centered),
-    n_points (instance's raw point count, broadcast to every one of its rows - cheap groupby
-    size, no caching needed unlike doppler_spread below), spatial_extent (instance's bounding-box
-    diagonal, sqrt(x_extent^2 + y_extent^2) where extent is max-min per axis - unlike x_rel/y_rel,
-    which are per-point and orientation-dependent (a car seen broadside vs head-on spreads very
-    differently across the x/y axes even though it's the same physical object), this is one
-    orientation-robust scalar per instance: rotating the point cloud changes x_extent/y_extent
-    individually but their combined diagonal is far more stable), radial (per-point Euclidean
-    distance from the instance's own centroid, sqrt(x_rel^2 + y_rel^2) - unlike spatial_extent,
-    which is a single outer-boundary scalar per instance driven by the two most extreme points,
-    radial is still one value per point, so a statistic like std(radial) describes how the whole
-    point cloud is distributed around its center, not just how big the bounding box is; also
-    exactly rotation-invariant, not just empirically stable, since it's built from a per-point
-    distance rather than two separate axis extents), azimuth_extent (instance's angular spread as
-    seen by the sensor, max-min of azimuth_sc - a different physical quantity than spatial_extent,
-    since a fixed-size object further away subtends a smaller angle, this folds in range-dependent
-    apparent size rather than raw Euclidean spread), rcs_extent/range_extent (max-min of rcs/
-    range_sc per instance, same recipe as azimuth_extent applied to the other two point-level
-    columns not already covered by spatial_extent), and doppler_spread (per-instance median
-    absolute deviation of vr_compensated). doppler_spread is the expensive part (~2-3 min at full
-    scale, one Python lambda per instance group), so it's cached to disk keyed by sequence_name and
-    reused if the cache covers the same sequences - same skip-if-covered pattern as
-    build_points_table.py's cache."""
+    """Adds per-point and per-instance derived features:
+
+    - `x_rel`/`y_rel`: point position relative to its instance's centroid (mean-centered).
+    - `n_points`: instance's raw point count, broadcast to every one of its rows (cheap
+      groupby size, no caching needed unlike doppler_spread below).
+    - `spatial_extent`: instance's bounding-box diagonal, sqrt(x_extent^2 + y_extent^2) where
+      extent is max-min per axis. Unlike x_rel/y_rel, which are per-point and
+      orientation-dependent (a car seen broadside vs. head-on spreads differently across the
+      x/y axes despite being the same object), this is one orientation-robust scalar per
+      instance: rotating the point cloud changes x_extent/y_extent individually but their
+      combined diagonal is far more stable.
+    - `radial`: per-point Euclidean distance from the instance's own centroid, sqrt(x_rel^2 +
+      y_rel^2). Unlike spatial_extent, a single outer-boundary scalar driven by the two most
+      extreme points, radial is one value per point, so a statistic like std(radial) describes
+      how the whole point cloud is distributed around its center, not just bounding-box size;
+      also exactly rotation-invariant (built from a per-point distance, not two axis extents),
+      not just empirically stable.
+    - `azimuth_extent`: instance's angular spread as seen by the sensor, max-min of
+      azimuth_sc. A different physical quantity than spatial_extent, since a fixed-size object
+      further away subtends a smaller angle, this folds in range-dependent apparent size
+      rather than raw Euclidean spread.
+    - `rcs_extent`/`range_extent`: max-min of rcs/range_sc per instance, same recipe as
+      azimuth_extent applied to the two point-level columns not already covered by
+      spatial_extent.
+    - `doppler_spread`: per-instance median absolute deviation of vr_compensated. The
+      expensive part (~2-3 min at full scale, one Python lambda per instance group), so it's
+      cached to disk keyed by sequence_name and reused if the cache covers the same sequences,
+      same skip-if-covered pattern as build_points_table.py's cache."""
     df = df.copy()
     group = df.groupby(INSTANCE_COLS)
     df["x_rel"] = df["x_cc"] - group["x_cc"].transform("mean")
@@ -71,9 +76,9 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def doppler_spread_diagnostics(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES) -> pd.DataFrame:
-    """raw doppler_spread histogram is unreadable due to extreme values: how much
-    of the zero-spike is single-point instances (spread is exactly 0 for a lone point by
-    construction, not an outlier being suppressed)"""
+    """Raw doppler_spread histogram is unreadable due to extreme values; checks how much of
+    the zero-spike is single-point instances (spread is exactly 0 for a lone point by
+    construction, not an outlier being suppressed)."""
     df = add_relative_features(df)
     sizes = df.groupby(["sequence_name", "timestamp", "track_id"]).size()
     sizes.name = "n_points"
@@ -100,8 +105,8 @@ def doppler_spread_diagnostics(df: pd.DataFrame, classes: list[str] = TAXONOMY_C
 def build_instance_features(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES) -> pd.DataFrame:
     """One feature row per instance: rcs/vr_compensated aggregated to their per-instance
     median (central tendency), x_rel/y_rel aggregated to their per-instance extent
-    (max - min, i.e. footprint size) - their per-instance mean is trivially ~0 by
-    construction since x_rel/y_rel are already mean-centered, so extent is used instead -
+    (max - min, i.e. footprint size); their per-instance mean is trivially ~0 by
+    construction since x_rel/y_rel are already mean-centered, so extent is used instead,
     plus doppler_spread (already one value per instance)."""
     df = df.loc[df["label_name"].isin(classes)]
     df = add_relative_features(df)
@@ -135,8 +140,8 @@ def run_separability_probe(
 
 def plot_taxonomy_class_balance(df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES):
     """Instance counts vs. sequence coverage for the taxonomy classes, restricted to the fixed
-    split's train+val sequences (test excluded, same scope as run_separability_probe_cv) - the
-    two aren't the same thing. large_vehicle can look only moderately rare by instance count
+    split's train+val sequences (test excluded, same scope as run_separability_probe_cv), the
+    two aren't the same thing: large_vehicle can look only moderately rare by instance count
     while being far rarer by sequence coverage (only 23 of 130 train+val sequences ever contain
     one), which is what actually drives its noisy CV fold-to-fold variance. Saves
     results/taxonomy_class_balance.png. Returns (summary, fig)."""
@@ -172,7 +177,7 @@ def plot_taxonomy_class_balance(df: pd.DataFrame, classes: list[str] = TAXONOMY_
     ax_seq.set_title("sequence coverage")
     ax_seq.legend(fontsize=8)
 
-    fig.suptitle("large_vehicle / truck / bus - train+val scope")
+    fig.suptitle("large_vehicle / truck / bus: train+val scope")
     fig.tight_layout()
 
     TAXONOMY_DIR.mkdir(parents=True, exist_ok=True)
@@ -220,7 +225,7 @@ def plot_cv_fold_class_counts(
     summary[classes].plot(kind="bar", ax=ax, color=[NAME_TO_COLOR[c] for c in classes], edgecolor="k")
     ax.set_xlabel("CV fold (held-out test portion)")
     ax.set_ylabel("instance count")
-    ax.set_title("large_vehicle / truck / bus - per-fold test-set counts (5-fold CV)")
+    ax.set_title("large_vehicle / truck / bus: per-fold test-set counts (5-fold CV)")
     ax.tick_params(axis="x", rotation=0)
     fig.tight_layout()
 
@@ -236,7 +241,7 @@ def run_separability_probe_cv(
     df: pd.DataFrame, classes: list[str] = TAXONOMY_CLASSES, n_splits: int = 5, random_state: int = 0
 ):
     """Same features as run_separability_probe, but restricted to the fixed split's train+val
-    sequences (results/sequence_split.json via sequence_split.load_split - test stays untouched)
+    sequences (results/sequence_split.json via sequence_split.load_split, test stays untouched)
     and scored with separability_probe.run_probe_cv's proper n_splits-fold averaging instead of
     a single fold. This is the version whose numbers should actually be compared/reported -
     run_separability_probe's single-fold numbers (still in Design_Decisions.md decision 1 as the

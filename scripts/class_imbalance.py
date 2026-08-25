@@ -1,6 +1,5 @@
-"""class imbalance check on the points table (a parquet file) built by build_points_table.py.
-Counts number instances per class and outputs an image
-"""
+"""Class imbalance check on the points table (parquet, built by build_points_table.py):
+counts instances per class and saves a bar chart."""
 import matplotlib.pyplot as plt
 import pandas as pd
 
