@@ -169,6 +169,14 @@
       "output_dir": "spatial_extent_added",
       "extra_features": ["doppler_spread", "spatial_extent"],
       "run_kwargs": {}
+    },
+    "no_vr_compensated": {
+      "_note": "Causal test of section 15's fold-instability mechanism: baseline's 4 histograms minus vr_compensated (rcs, x_rel, y_rel only), doppler_spread unchanged. If two_wheeler's fold-to-fold F1 spread narrows once the model can no longer lean on the one feature that's both unstable across folds for two_wheeler (mean pairwise KS 0.370, section 15) and the single most load-bearing feature overall (zero-out drop -0.331, section 14a), that's direct causal evidence for the mechanism, not just correlation. Expect absolute macro F1 and two_wheeler F1 to drop substantially (vr_compensated carries real signal), the question is specifically whether the spread across the 6 split-sensitivity folds shrinks, ideally checked as relative spread (spread / mean) too, since a lower F1 baseline has less room to vary regardless of mechanism.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "no_vr_compensated",
+      "features": ["rcs", "x_rel", "y_rel"],
+      "run_kwargs": {}
     }
   }
 }
