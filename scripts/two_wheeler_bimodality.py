@@ -5,19 +5,29 @@ contributor for two_wheeler, despite the class spanning two different physical v
 regimes (a slow bicycle, a much faster moped/scooter), worth checking directly rather than
 assuming that reliance is on a coherent signal.
 
-Two checks:
+Three checks:
 - Histogram + 1 vs 2-component GMM BIC on per-instance vr_compensated: is the pooled
   two_wheeler distribution genuinely bimodal, and does that trace to the sub-label split.
 - Separability probe (LR + RF, same PROBE_FEATURES/run_probe machinery as the bus/large_
   vehicle/truck taxonomy decision): can bicycle and motorized_two_wheeler actually be told
-  apart from each other, the direct question underneath the taxonomy choice to merge them."""
+  apart from each other, the direct question underneath the taxonomy choice to merge them.
+- Fold composition check: a surgical, no-retraining test of the composition-shift mechanism
+  the two checks above couldn't rule out, does a fold with a heavier motorized_two_wheeler
+  mix among its two_wheeler val instances read as a vr_compensated cross-fold outlier
+  (fold_stability.py's cached pairwise KS) or an F1 outlier (baseline's split-search folds)."""
+import json
+
 import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.mixture import GaussianMixture
 
 from dataloader import RESULTS_DIR
+from feature_distributions import MLP_CLASSES, POINT_LEVEL_FEATURES
+from fold_stability import FOLD_STABILITY_DIR
+from mlp_classifier import MLP_DIR, apply_mlp_class_groups
 from separability_probe import run_probe
-from taxonomy_separability import NAME_TO_COLOR, PROBE_FEATURES, build_instance_features
+from sequence_split import INSTANCE_COLS, select_best_split
+from taxonomy_separability import NAME_TO_COLOR, PROBE_FEATURES, add_relative_features, build_instance_features
 
 SUBCLASSES = ["bicycle", "motorized_two_wheeler"]
 TWO_WHEELER_DIR = RESULTS_DIR / "two_wheeler_bimodality"
@@ -102,6 +112,62 @@ def run_bicycle_motorized_probe(df: pd.DataFrame, classes: list[str] = SUBCLASSE
     )
 
 
+def fold_composition_vs_instability(
+    df: pd.DataFrame,
+    stratify_classes: list[str] = MLP_CLASSES,
+    n_seeds: int = 10,
+    base_random_state: int = 0,
+) -> pd.DataFrame:
+    """For each of the 6 split-sensitivity/fold_stability folds (same select_best_split call,
+    so identical fold definitions), the motorized_two_wheeler share of that fold's two_wheeler
+    val instances, against that fold's vr_compensated KS-to-other-folds (fold_stability.py's
+    cached pairwise matrix, results/fold_stability/) and baseline two_wheeler F1
+    (results/mlp/split_search/fold_<n>/). If motorized_two_wheeler-heavy folds are also the
+    vr_compensated/F1 outliers, that's direct evidence the composition-shift mechanism
+    contributes; if the two are uncorrelated, sparsity/averaging noise alone (section 15/16)
+    remains the better-supported explanation."""
+    df = apply_mlp_class_groups(add_relative_features(df))
+    candidates = (
+        select_best_split(df, classes=stratify_classes, features=POINT_LEVEL_FEATURES,
+                           n_seeds=n_seeds, base_random_state=base_random_state)
+        .drop_duplicates("fold").sort_values("fold")
+    )
+
+    instances = df.loc[df["group"] == "two_wheeler"].drop_duplicates(INSTANCE_COLS)
+    rows = []
+    for _, row in candidates.iterrows():
+        fold_instances = instances.loc[instances["sequence_name"].isin(row["val_sequences"])]
+        counts = fold_instances["label_name"].value_counts()
+        n_bicycle, n_motorized = counts.get("bicycle", 0), counts.get("motorized_two_wheeler", 0)
+        rows.append({
+            "fold": row["fold"], "n_bicycle": n_bicycle, "n_motorized": n_motorized,
+            "motorized_share": n_motorized / (n_bicycle + n_motorized) if (n_bicycle + n_motorized) else float("nan"),
+        })
+    composition = pd.DataFrame(rows).set_index("fold")
+
+    ks = pd.read_csv(FOLD_STABILITY_DIR / "ks_matrix_by_fold_rcs_vr_compensated_x_rel_y_rel.csv")
+    ks = ks.loc[(ks["class"] == "two_wheeler") & (ks["feature"] == "vr_compensated") & (ks["fold_i"] != ks["fold_j"])]
+    ks_by_fold = ks.groupby("fold_i")["ks"].mean().rename("mean_ks_to_other_folds")
+
+    f1_by_fold = {}
+    for fold in composition.index:
+        metrics = json.loads((MLP_DIR / "split_search" / f"fold_{fold}" / "mlp_val_metrics.json").read_text())
+        f1_by_fold[fold] = metrics["two_wheeler"]["f1"]
+
+    result = composition.join(ks_by_fold).join(pd.Series(f1_by_fold, name="two_wheeler_f1"))
+    print(result.round(3).to_string())
+
+    corr = result[["motorized_share", "mean_ks_to_other_folds", "two_wheeler_f1"]].corr(method="spearman")
+    print("\nSpearman correlation (n=6 folds, read directionally not as a significance test):")
+    print(corr.round(3).to_string())
+
+    TWO_WHEELER_DIR.mkdir(parents=True, exist_ok=True)
+    path = TWO_WHEELER_DIR / "fold_composition_vs_instability.csv"
+    result.to_csv(path)
+    print(f"\nSaved {path}")
+    return result
+
+
 if __name__ == "__main__":
     from build_points_table import build_and_save_points_table
 
@@ -110,6 +176,7 @@ if __name__ == "__main__":
     plot_vr_compensated_bimodality(df)
     gmm_bic_check(df)
     run_bicycle_motorized_probe(df)
+    fold_composition_vs_instability(df)
 
     # Overall finding: mixed, not a clean confirmation. The pooled GMM technically prefers 2
     # components, but that's not well explained by a bicycle/moped split (motorized_two_wheeler
