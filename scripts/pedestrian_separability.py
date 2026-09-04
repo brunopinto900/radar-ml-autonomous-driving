@@ -359,6 +359,42 @@ def rcs_position_correlation(df: pd.DataFrame, classes: list[str] = CONFUSION_CL
     return pd.DataFrame(rows).set_index(["class", "feature"])
 
 
+VR_BANDS = (0.5, 1.0, 2.0)
+
+
+def vr_local_density_ratio(df: pd.DataFrame, classes: list[str] = CONFUSION_CLASSES) -> pd.DataFrame:
+    """Direct mechanism check for the confusion's direction (`two_wheeler`->`pedestrian` common,
+    the reverse rare): not "do the distributions overlap" (`feature_distribution_ks`) but "which
+    class actually outnumbers the other inside the shared near-zero `vr_compensated` band,"
+    per regime. Raw point counts within `abs(vr_compensated) < threshold`, no density
+    estimation, reported both as a share of each class's own regime total (within-class) and as
+    a direct between-class ratio (`local_ratio` = classes[0] count / classes[1] count), the
+    number that approximates what a classifier implicitly weighs when deciding what an
+    ambiguous near-zero-velocity point actually is."""
+    df = apply_mlp_class_groups(df)
+    df = df.loc[df["group"].isin(classes)]
+    df = add_relative_features(df)
+
+    regimes = {
+        "sparse": df["n_points"] <= SPARSE_MAX,
+        "dense": df["n_points"] >= DENSE_MIN,
+    }
+    rows = []
+    for regime, mask in regimes.items():
+        sub = df.loc[mask]
+        totals = sub["group"].value_counts()
+        for thresh in VR_BANDS:
+            band = sub.loc[sub["vr_compensated"].abs() < thresh]
+            counts = band["group"].value_counts()
+            row = {"regime": regime, "vr_band": thresh}
+            for cls in classes:
+                row[f"{cls}_n"] = int(counts.get(cls, 0))
+                row[f"{cls}_pct_of_total"] = 100 * counts.get(cls, 0) / totals[cls]
+            row["local_ratio"] = counts.get(classes[0], 0) / max(counts.get(classes[1], 0), 1)
+            rows.append(row)
+    return pd.DataFrame(rows).set_index(["regime", "vr_band"])
+
+
 def summarize_probe_results(results: dict) -> pd.DataFrame:
     """Compact regime x model table from run_sparse_regime_probe's output: macro F1 (mean of
     per-class f1 in metrics_per_class) and pairwise AUC (same value for both classes in binary

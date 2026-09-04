@@ -64,6 +64,11 @@ def add_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     if DOPPLER_SPREAD_CACHE.exists():
         cached = pd.read_parquet(DOPPLER_SPREAD_CACHE)
         if set(cached["sequence_name"].unique()) == sequences:
+            # df may already carry a doppler_spread column if this function ran once before on
+            # related data (e.g. a caller re-deriving features from an already-processed df) -
+            # merging without dropping it first silently renames both to doppler_spread_x/_y
+            # instead of raising, so doppler_spread quietly vanishes for anything downstream.
+            df = df.drop(columns=["doppler_spread"], errors="ignore")
             return df.merge(cached, on=INSTANCE_COLS, how="left")
         print(f"{DOPPLER_SPREAD_CACHE} covers different sequences than requested, recomputing doppler_spread")
 
