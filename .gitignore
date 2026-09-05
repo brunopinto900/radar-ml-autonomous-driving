@@ -12,3 +12,6 @@ notebooks/mlp_ablations_lengthy_one.ipynb
 results/
 __pycache__/
 .ipynb_checkpoints/
+scripts/regime_specialist_mlps.py
+scripts/shape_features_academic.py
+scripts/sparse_rcs_mechanism_check.py

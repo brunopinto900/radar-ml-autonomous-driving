@@ -377,6 +377,7 @@ def _real_model_val_diagnostics_base(df: pd.DataFrame):
     instance_stats = val_df.groupby(INSTANCE_COLS).agg(
         rcs_median=("rcs", "median"),
         vr_compensated_median=("vr_compensated", "median"),
+        range_sc_median=("range_sc", "median"),
         x_extent=("x_rel", lambda s: s.max() - s.min()),
         y_extent=("y_rel", lambda s: s.max() - s.min()),
         spatial_extent=("spatial_extent", "first"),
@@ -454,7 +455,7 @@ def real_model_pairwise_permutation_importance(
     return result.reindex(["sparse", "mid", "dense"], level="regime")
 
 
-RAW_PROFILE_FEATURES = ["rcs_median", "vr_compensated_median", "x_extent", "y_extent", "spatial_extent"]
+RAW_PROFILE_FEATURES = ["rcs_median", "vr_compensated_median", "range_sc_median", "x_extent", "y_extent", "spatial_extent"]
 
 
 def real_model_feature_profile(df: pd.DataFrame) -> pd.DataFrame:
