@@ -14,6 +14,7 @@ run_probe."""
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 from scipy.stats import ks_2samp, pearsonr, spearmanr
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -22,10 +23,11 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import StandardScaler
 
 from dataloader import FINAL_CLASS_COLORS, RESULTS_DIR
-from feature_distributions import INSTANCE_LEVEL_FEATURES, POINT_LEVEL_FEATURES
-from histogram_separability import build_histogram_features
-from mlp_classifier import N_BINS, apply_mlp_class_groups
+from feature_distributions import HISTOGRAM_FEATURES, INSTANCE_LEVEL_FEATURES, MLP_CLASSES, POINT_LEVEL_FEATURES
+from histogram_separability import build_histogram_features, fit_bin_edges
+from mlp_classifier import DEVICE, HIDDEN_DIM, MLP, MLP_DIR, MODEL_FILENAME, N_BINS, apply_mlp_class_groups
 from separability_probe import class_weights, run_probe
+from sequence_split import select_best_split
 from taxonomy_separability import INSTANCE_COLS, PROBE_FEATURES, add_relative_features
 
 CONFUSION_CLASSES = ["pedestrian", "two_wheeler"]
@@ -410,6 +412,268 @@ def summarize_probe_results(results: dict) -> pd.DataFrame:
                 "pairwise_auc": next(iter(auc_per_class.values())),
             })
     return pd.DataFrame(rows).set_index(["regime", "model"])
+
+
+def _histogram_features_with_keys(
+    df: pd.DataFrame,
+    n_bins: int,
+    classes: list[str],
+    features: list[str],
+    edges: dict,
+    extra_features: list[str],
+    normalize: bool = True,
+) -> pd.DataFrame:
+    """Identical construction to histogram_separability.build_histogram_features, except
+    INSTANCE_COLS (sequence_name/timestamp/track_id) are kept as explicit columns instead of
+    being discarded by reset_index(drop=True). mlp_probe_agreement needs to align two
+    separately built encodings (the MLP's 5-class one, the probe's 2-class one) on the same
+    physical instance, relying on implicit row-order matching across two different
+    constructions would be a silent-failure risk not worth taking for a key this cheap to
+    keep."""
+    df = df.loc[df["group"].isin(classes)]
+    hist_frames = []
+    for feature in features:
+        e = edges[feature]
+        bin_idx = np.clip(np.digitize(df[feature], e[1:-1]), 0, n_bins - 1)
+        counts = (
+            df.assign(_bin=bin_idx)
+            .groupby(INSTANCE_COLS + ["_bin"])
+            .size()
+            .unstack(fill_value=0)
+            .reindex(columns=range(n_bins), fill_value=0)
+        )
+        counts.columns = [f"{feature}_bin{i}" for i in range(n_bins)]
+        if normalize:
+            row_sums = counts.sum(axis=1)
+            counts = counts.div(row_sums.where(row_sums > 0, 1), axis=0)
+        hist_frames.append(counts)
+
+    features_df = pd.concat(hist_frames, axis=1)
+    extra = df.drop_duplicates(INSTANCE_COLS).set_index(INSTANCE_COLS, drop=False)
+    extra = extra[extra_features + ["group"] + INSTANCE_COLS]
+    return features_df.join(extra).reset_index(drop=True)
+
+
+def mlp_probe_agreement(
+    df: pd.DataFrame,
+    n_seeds: int = 10,
+    base_random_state: int = 0,
+) -> pd.DataFrame:
+    """Test B: does the MLP's actual two_wheeler val errors look like a genuine data ceiling (an
+    independent probe finds the same instances hard too) or an MLP-specific gap (the probe
+    confidently gets them right, the MLP doesn't)? Pooled across the 6 split-sensitivity folds
+    (split_sensitivity.py's select_best_split), not the single standing split, two_wheeler has
+    this project's largest fold-to-fold instability (F1 spread 0.386, Summary item 3), so one
+    split's answer isn't trustworthy alone here.
+
+    Per fold: loads that fold's already-cached baseline MLP (results/mlp/split_search/fold_<n>,
+    no retraining), gets its actual argmax predictions on that fold's val two_wheeler instances,
+    same MLP_CLASSES bin edges (fit on that fold's train, all 5 classes) the model was actually
+    trained with. Separately refits an LR/RF probe restricted to pedestrian/two_wheeler on that
+    same fold's train sequences (no leakage against the fold's own val set), with its own bin
+    edges fit on that 2-class train subset, a deliberate choice, not reusing the MLP's 5-class
+    edges, the probe is meant to be an independently-reasonable encoding of the same raw data,
+    not yoked to the MLP pipeline's own preprocessing.
+
+    Restricts to MLP val two_wheeler instances the MLP called either two_wheeler (correct) or
+    pedestrian (the confusion under study); predictions of car/pedestrian_group are a different
+    failure mode, out of scope here. Joins MLP and probe predictions on the shared instance key.
+
+    Returns one row per (fold, instance): mlp_pred, probe_pred_lr/rf, probe_p_pedestrian_lr/rf."""
+    candidates = select_best_split(
+        df, classes=MLP_CLASSES, features=HISTOGRAM_FEATURES, n_seeds=n_seeds, base_random_state=base_random_state
+    ).drop_duplicates("fold").sort_values("fold")
+
+    all_rows = []
+    for _, cand in candidates.iterrows():
+        fold = cand["fold"]
+        splits = {"train": cand["train_sequences"], "val": cand["val_sequences"], "test": cand["test_sequences"]}
+        train_df = df.loc[df["sequence_name"].isin(splits["train"])]
+        val_df = df.loc[df["sequence_name"].isin(splits["val"])]
+
+        # --- MLP side: real cached model, real 5-class edges ---
+        mlp_edges = fit_bin_edges(train_df, N_BINS, POINT_LEVEL_FEATURES, range_method="percentile")
+        mlp_val = _histogram_features_with_keys(
+            val_df, N_BINS, MLP_CLASSES, POINT_LEVEL_FEATURES, mlp_edges, INSTANCE_LEVEL_FEATURES, normalize=True
+        )
+        mlp_feature_cols = [c for c in mlp_val.columns if c not in ("group", *INSTANCE_COLS)]
+        X_mlp = mlp_val[mlp_feature_cols].to_numpy(dtype="float32")
+
+        model_cache = MLP_DIR / "split_search" / f"fold_{fold}" / MODEL_FILENAME
+        model = MLP(
+            input_dim=X_mlp.shape[1], hidden_dim=HIDDEN_DIM, num_classes=len(MLP_CLASSES),
+            n_hidden_layers=2, dropout=0.0, batch_norm=False,
+        ).to(DEVICE)
+        model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+        model.eval()
+        with torch.no_grad():
+            mlp_pred_idx = model(torch.tensor(X_mlp, device=DEVICE)).argmax(dim=1).cpu().numpy()
+        mlp_val = mlp_val.assign(mlp_pred=[MLP_CLASSES[i] for i in mlp_pred_idx])
+
+        two_wheeler_mask = mlp_val["group"] == "two_wheeler"
+        in_scope = mlp_val["mlp_pred"].isin(CONFUSION_CLASSES)
+        mlp_tw = mlp_val.loc[two_wheeler_mask & in_scope, INSTANCE_COLS + ["mlp_pred"]]
+
+        # --- probe side: independently trained, own edges, same fold's train sequences ---
+        probe_train_df = train_df.loc[train_df["group"].isin(CONFUSION_CLASSES)]
+        probe_edges = fit_bin_edges(probe_train_df, N_BINS, POINT_LEVEL_FEATURES, range_method="percentile")
+        probe_train_hist = _histogram_features_with_keys(
+            probe_train_df, N_BINS, CONFUSION_CLASSES, POINT_LEVEL_FEATURES, probe_edges, INSTANCE_LEVEL_FEATURES, normalize=True
+        )
+        probe_val_hist = _histogram_features_with_keys(
+            val_df, N_BINS, CONFUSION_CLASSES, POINT_LEVEL_FEATURES, probe_edges, INSTANCE_LEVEL_FEATURES, normalize=True
+        )
+        probe_feature_cols = [c for c in probe_train_hist.columns if c not in ("group", *INSTANCE_COLS)]
+
+        X_train = probe_train_hist[probe_feature_cols].to_numpy(dtype="float64")
+        y_train = probe_train_hist["group"].to_numpy(dtype=str)
+        X_val = probe_val_hist[probe_feature_cols].to_numpy(dtype="float64")
+
+        scaler = StandardScaler().fit(X_train)
+        weights = class_weights(pd.Series(y_train))
+        lr = LogisticRegression(max_iter=1000, class_weight=weights).fit(scaler.transform(X_train), y_train)
+        rf = RandomForestClassifier(n_estimators=300, class_weight=weights, random_state=base_random_state).fit(X_train, y_train)
+
+        pos_idx_lr = list(lr.classes_).index("pedestrian")
+        pos_idx_rf = list(rf.classes_).index("pedestrian")
+        probe_val_hist = probe_val_hist.assign(
+            probe_pred_lr=lr.predict(scaler.transform(X_val)),
+            probe_pred_rf=rf.predict(X_val),
+            probe_p_pedestrian_lr=lr.predict_proba(scaler.transform(X_val))[:, pos_idx_lr],
+            probe_p_pedestrian_rf=rf.predict_proba(X_val)[:, pos_idx_rf],
+        )
+
+        merged = mlp_tw.merge(
+            probe_val_hist[INSTANCE_COLS + ["probe_pred_lr", "probe_pred_rf", "probe_p_pedestrian_lr", "probe_p_pedestrian_rf"]],
+            on=INSTANCE_COLS, how="inner",
+        )
+        merged["fold"] = fold
+        all_rows.append(merged)
+
+    return pd.concat(all_rows, ignore_index=True)
+
+
+def summarize_mlp_probe_agreement(result: pd.DataFrame) -> pd.DataFrame:
+    """Of the MLP's actual errors (mlp_pred=='pedestrian'), what fraction does the independent
+    RF/LR probe also call 'pedestrian'? High agreement -> genuine data ceiling (an independent
+    model finds the same instances ambiguous too). Low agreement -> the probe finds usable
+    signal the MLP isn't using, an MLP-specific gap. Reports the same breakdown for the MLP's
+    correct calls as a sanity baseline (should show high agreement if the probe is reasonable)."""
+    rows = []
+    for mlp_pred, sub in result.groupby("mlp_pred"):
+        for model in ("lr", "rf"):
+            rows.append({
+                "mlp_pred": mlp_pred,
+                "probe_model": model,
+                "n": len(sub),
+                "probe_agrees_pct": 100 * (sub[f"probe_pred_{model}"] == mlp_pred).mean(),
+                "mean_probe_p_pedestrian": sub[f"probe_p_pedestrian_{model}"].mean(),
+            })
+    return pd.DataFrame(rows).set_index(["mlp_pred", "probe_model"])
+
+
+def mlp_vs_rf_multiclass(
+    df: pd.DataFrame,
+    n_seeds: int = 10,
+    base_random_state: int = 0,
+) -> pd.DataFrame:
+    """Closes mlp_probe_agreement's scope caveat: that comparison used a binary probe (only ever
+    choosing two_wheeler vs. pedestrian), an easier task than the MLP's real 5-way job. This
+    fits a 5-class RandomForestClassifier on the exact same per-fold 65-dim histogram encoding
+    the MLP trains on (same bin edges, same MLP_CLASSES, same fold's train sequences), so the
+    comparison is genuinely fair: same features, same 5-way task, different model family (tree
+    ensemble vs. this project's small 2x16 MLP), not a different, easier task. Also the first
+    time this project has compared a different model family on the same features, sections 6-7
+    only ever varied the MLP's own capacity/depth.
+
+    Reuses the exact same per-fold MLP-side construction as mlp_probe_agreement (same edges,
+    same feature matrix), so mlp_pred/rf_pred are computed on identical inputs, only the
+    classifier differs. Pooled across the same 6 split-sensitivity folds, no leakage (RF is
+    trained on that fold's train sequences only).
+
+    Returns one row per (fold, instance), every class, not restricted to two_wheeler: group
+    (true class), mlp_pred, rf_pred."""
+    candidates = select_best_split(
+        df, classes=MLP_CLASSES, features=HISTOGRAM_FEATURES, n_seeds=n_seeds, base_random_state=base_random_state
+    ).drop_duplicates("fold").sort_values("fold")
+
+    all_rows = []
+    for _, cand in candidates.iterrows():
+        fold = cand["fold"]
+        splits = {"train": cand["train_sequences"], "val": cand["val_sequences"], "test": cand["test_sequences"]}
+        train_df = df.loc[df["sequence_name"].isin(splits["train"])]
+        val_df = df.loc[df["sequence_name"].isin(splits["val"])]
+
+        edges = fit_bin_edges(train_df, N_BINS, POINT_LEVEL_FEATURES, range_method="percentile")
+        train_hist = _histogram_features_with_keys(
+            train_df, N_BINS, MLP_CLASSES, POINT_LEVEL_FEATURES, edges, INSTANCE_LEVEL_FEATURES, normalize=True
+        )
+        val_hist = _histogram_features_with_keys(
+            val_df, N_BINS, MLP_CLASSES, POINT_LEVEL_FEATURES, edges, INSTANCE_LEVEL_FEATURES, normalize=True
+        )
+        feature_cols = [c for c in train_hist.columns if c not in ("group", *INSTANCE_COLS)]
+
+        # --- MLP side: real cached model, no retraining ---
+        X_val_mlp = val_hist[feature_cols].to_numpy(dtype="float32")
+        model_cache = MLP_DIR / "split_search" / f"fold_{fold}" / MODEL_FILENAME
+        model = MLP(
+            input_dim=X_val_mlp.shape[1], hidden_dim=HIDDEN_DIM, num_classes=len(MLP_CLASSES),
+            n_hidden_layers=2, dropout=0.0, batch_norm=False,
+        ).to(DEVICE)
+        model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+        model.eval()
+        with torch.no_grad():
+            mlp_pred_idx = model(torch.tensor(X_val_mlp, device=DEVICE)).argmax(dim=1).cpu().numpy()
+
+        # --- RF side: 5-class, same features, same fold's train sequences ---
+        X_train = train_hist[feature_cols].to_numpy(dtype="float64")
+        y_train = train_hist["group"].to_numpy(dtype=str)
+        X_val_rf = val_hist[feature_cols].to_numpy(dtype="float64")
+
+        weights = class_weights(pd.Series(y_train))
+        rf = RandomForestClassifier(n_estimators=300, class_weight=weights, random_state=base_random_state).fit(X_train, y_train)
+        rf_pred = rf.predict(X_val_rf)
+
+        fold_result = val_hist[INSTANCE_COLS + ["group"]].copy()
+        fold_result["mlp_pred"] = [MLP_CLASSES[i] for i in mlp_pred_idx]
+        fold_result["rf_pred"] = rf_pred
+        fold_result["fold"] = fold
+        all_rows.append(fold_result)
+
+    return pd.concat(all_rows, ignore_index=True)
+
+
+def summarize_mlp_vs_rf_multiclass(result: pd.DataFrame, classes: list[str] = MLP_CLASSES) -> pd.DataFrame:
+    """Per-class recall, MLP vs. the 5-class RF, same instances, same features, plus macro
+    recall. Answers whether RF's advantage on two_wheeler (mlp_probe_agreement, binary) survives
+    once RF also has to handle the other 4 classes, the fair version of that comparison."""
+    rows = []
+    for cls in classes:
+        sub = result.loc[result["group"] == cls]
+        rows.append({
+            "class": cls,
+            "n": len(sub),
+            "mlp_recall": (sub["mlp_pred"] == cls).mean(),
+            "rf_recall": (sub["rf_pred"] == cls).mean(),
+        })
+    summary = pd.DataFrame(rows)
+    summary.loc["macro_avg"] = {
+        "class": "macro_avg", "n": summary["n"].sum(),
+        "mlp_recall": summary["mlp_recall"].mean(), "rf_recall": summary["rf_recall"].mean(),
+    }
+    return summary.set_index("class")
+
+
+def two_wheeler_confusion_breakdown(result: pd.DataFrame, classes: list[str] = MLP_CLASSES) -> pd.DataFrame:
+    """Row-normalized confusion breakdown for true two_wheeler only, MLP vs. RF side by side,
+    the direct fair-comparison analog of the original mlp_confusion_matrix.png row this whole
+    investigation started from."""
+    sub = result.loc[result["group"] == "two_wheeler"]
+    rows = []
+    for model in ("mlp", "rf"):
+        counts = sub[f"{model}_pred"].value_counts(normalize=True)
+        rows.append({"model": model, **{cls: counts.get(cls, 0.0) for cls in classes}})
+    return pd.DataFrame(rows).set_index("model")
 
 
 if __name__ == "__main__":
