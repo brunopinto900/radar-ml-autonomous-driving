@@ -18,6 +18,8 @@ At this sample size, don't bin: use per instance scatter/strip plots or ECDFs in
 
 **6. Process lesson: cheap-diagnostic-first discipline was inconsistent.** Section 10's point count diagnostic (no retraining, slices an existing model's predictions) directly answers the sparsity question and is the cheapest test in the whole program, it should have run second or third, not eighth. Most of sections 6-9 and 11-12 are retrain-heavy proxies for the same question it answers directly, run before it rather than after. The truck_car_regroup detour (an old-project taxonomy idea, tested and reverted, not in this log) was the same mistake in a more expensive form: a full 200-epoch retrain plus a separability probe on an unreplicated hypothesis, before it was abandoned. Run the low-cost diagnostic before committing to an expensive one, not the reverse.
 
+**7. Test set, checked once, confirms everything above (section 23).** Test macro F1 0.699 vs. val's 0.686, inside the project's own noise floor, no overfitting, no surprise. `two_wheeler` moves the most (f1 +0.059), consistent with it being the least stable class throughout.
+
 Detailed, chronological log below.
 
 ## Model config
@@ -373,5 +375,13 @@ Same confusion-matrix-driven investigation as sections 13/19/20, applied to the 
 - **If expanding or redesigning this dataset**: attack sparsity directly with denser/longer tracks, spread rare classes and subtypes across many independent sequences instead of a few, deliberately decouple range from class, and capture independent ground-truth size/shape. Audit per-regime class counts, split-sensitivity, and cross-class KS/separability before finalizing the taxonomy, not after.
   - A single lingering object, not an unusual number of different objects, is enough to dominate a sequence's whole supply of a class: a `two_wheeler` stopped at a light or riding alongside the ego vehicle gets re-detected every scan, so one idling cyclist across a long dwell time can generate hundreds of correlated instances, all sharing one `track_id`, within one sequence (the real mechanism behind `two_wheeler`'s top1/top3 sequence share, Summary item 3). Those instances aren't independent evidence about the class, they're mostly one object's near-duplicate trajectory, and whichever such sequence a split assigns to val can swing that split's whole picture of the class regardless of the correct overall ratio. A stopped/idling `two_wheeler` specifically skews its own `vr_compensated` distribution toward near-zero, which is the exact region `pedestrian` occupies (section 19's containment/density-ratio finding), so this mechanism doesn't just destabilize splits, it can directly manufacture part of the `two_wheeler`->`pedestrian` confusion itself.
 - **Validate raw diagnostic statistics across splits, not just macro F1.** Section 21's sparse-regime `rcs` reversal traced to exactly one val-restricted, small-n conditioned subset, the same split-composition sensitivity the 6-fold check (Summary item 3) already established for performance metrics applies equally to raw feature medians on a small regime/class-conditioned population, check against the whole dataset or multiple splits before trusting one.
+
+## 23. Test set: the one and only check
+
+Every prior section evaluated on val only, deliberately, test stayed untouched throughout training, tuning, and every ablation. `mlp_classifier.evaluate_test_metrics` (mirrors `evaluate_val_metrics`, own cache files), called once from `notebooks/mlp_test_evaluation.ipynb`, after all tuning was finished.
+
+Test macro F1 0.699 vs. val's 0.686 (+0.013), comfortably inside the 0.651-0.734 split-choice noise floor established early on (Model config). Per class (val f1 -> test f1): `car` 0.854->0.877, `large_vehicle` 0.756->0.766, `two_wheeler` 0.508->0.567, `pedestrian` 0.682->0.677, `pedestrian_group` 0.632->0.608. All within noise. `two_wheeler` moves the most, consistent with it being the class with by far the largest fold-to-fold instability throughout this project (Summary item 3).
+
+**Finding:** no overfitting, no test-set surprise, the baseline generalizes exactly as consistently as the 6-fold split-sensitivity check already implied it would. This is a confirmation, not a new result, everything actionable in this project came from val-side diagnostics; this closes the loop on it once.
 
 See Summary at the top for the ranked takeaways, this log ends here.

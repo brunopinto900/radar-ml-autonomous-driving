@@ -39,6 +39,9 @@ VAL_METRICS_FILENAME = "mlp_val_metrics.json"
 CONFUSION_MATRIX_FILENAME = "mlp_confusion_matrix.png"
 METRICS_BAR_FILENAME = "mlp_precision_recall_f1.png"
 POINT_COUNT_CURVE_FILENAME = "mlp_point_count_curve.png"
+TEST_METRICS_FILENAME = "mlp_test_metrics.json"
+TEST_CONFUSION_MATRIX_FILENAME = "mlp_test_confusion_matrix.png"
+TEST_METRICS_BAR_FILENAME = "mlp_test_precision_recall_f1.png"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -259,6 +262,103 @@ def evaluate_test(model, X_test: np.ndarray, y_test: np.ndarray) -> float:
         test_acc = (model(X_test_t).argmax(dim=1) == y_test_t).float().mean().item()
     print(f"test accuracy: {test_acc:.4f}")
     return test_acc
+
+
+def evaluate_test_metrics(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    output_dir=MLP_DIR,
+    features: list[str] = POINT_LEVEL_FEATURES,
+    extra_features: list[str] = INSTANCE_LEVEL_FEATURES,
+    splits: dict[str, list[str]] | None = None,
+    normalize: bool = True,
+    feature_stats: dict[str, list[str]] | None = None,
+    bin_range: str = "percentile",
+    standardize_extra: bool = False,
+    hidden_dim: int = HIDDEN_DIM,
+    n_hidden_layers: int = 2,
+    dropout: float = 0.0,
+    batch_norm: bool = False,
+):
+    """The one and only time test should be touched (same rule as evaluate_test, this is that
+    check extended to full per-class metrics instead of just accuracy): per-class precision/
+    recall/f1 + confusion matrix on test, computed from the cached trained model in
+    `output_dir`, never retrains, only loads. Call once, after training/tuning is fully
+    finished, never during model selection, never to compare against val's own number and then
+    go back and tune further, that defeats the entire point of holding test out.
+
+    Same mechanics as evaluate_val_metrics (see its docstring for parameter meaning), swapped to
+    the test split, with its own cache files (TEST_METRICS_FILENAME/TEST_CONFUSION_MATRIX_FILENAME/
+    TEST_METRICS_BAR_FILENAME) so this never overwrites the val-side artifacts.
+
+    Returns (metrics_df, confusion_matrix_fig, bar_fig)."""
+    from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
+
+    model_cache = output_dir / MODEL_FILENAME
+    test_metrics_cache = output_dir / TEST_METRICS_FILENAME
+    confusion_matrix_path = output_dir / TEST_CONFUSION_MATRIX_FILENAME
+    metrics_bar_path = output_dir / TEST_METRICS_BAR_FILENAME
+
+    if not model_cache.exists():
+        raise FileNotFoundError(f"{model_cache} doesn't exist, run run_training() first")
+
+    _, _, _, _, X_test, y_test, _ = prepare_split_features(
+        df, classes=classes, features=features, extra_features=extra_features, splits=splits,
+        normalize=normalize, feature_stats=feature_stats, bin_range=bin_range,
+        standardize_extra=standardize_extra,
+    )
+
+    model = MLP(
+        input_dim=X_test.shape[1], hidden_dim=hidden_dim, num_classes=len(classes),
+        n_hidden_layers=n_hidden_layers, dropout=dropout, batch_norm=batch_norm,
+    ).to(DEVICE)
+    model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+    model.eval()
+    with torch.no_grad():
+        y_pred = model(torch.tensor(X_test, device=DEVICE)).argmax(dim=1).cpu().numpy()
+
+    if test_metrics_cache.exists() and test_metrics_cache.stat().st_mtime >= model_cache.stat().st_mtime:
+        metrics_df = pd.read_json(test_metrics_cache, orient="index")
+        print(f"{test_metrics_cache} already cached, reusing")
+    else:
+        precision, recall, f1, support = precision_recall_fscore_support(
+            y_test, y_pred, labels=range(len(classes)), zero_division=0
+        )
+        metrics_df = pd.DataFrame(
+            {"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        metrics_df.to_json(test_metrics_cache, orient="index", indent=2)
+        print(f"Saved {test_metrics_cache}")
+    print("per-class precision/recall/f1 (test):")
+    print(metrics_df.round(3).to_string())
+
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(y_test, y_pred, labels=range(len(classes)), normalize="true")
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
+    ax.set_title("MLP: test confusion matrix (row-normalized)")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    fig.tight_layout()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(confusion_matrix_path, dpi=150)
+    print(f"Saved {confusion_matrix_path}")
+
+    bar_fig, bar_ax = plt.subplots(figsize=(9, 5))
+    metrics_df[["precision", "recall", "f1"]].plot(kind="bar", ax=bar_ax, edgecolor="k")
+    bar_ax.set_ylim(0, 1)
+    bar_ax.set_ylabel("score")
+    bar_ax.set_title("MLP: per-class precision/recall/f1 (test)")
+    bar_ax.legend(loc="lower right")
+    plt.setp(bar_ax.get_xticklabels(), rotation=45, ha="right")
+    bar_fig.tight_layout()
+
+    bar_fig.savefig(metrics_bar_path, dpi=150)
+    print(f"Saved {metrics_bar_path}")
+
+    return metrics_df, fig, bar_fig
 
 
 def evaluate_val_metrics(
