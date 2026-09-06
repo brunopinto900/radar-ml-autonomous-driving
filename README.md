@@ -44,7 +44,10 @@ python3 scripts/mlp_variants.py deep10
 1. `Design_Decisions.md`: taxonomy, encoding, and split decisions, with evidence.
 2. `notebooks/data_analysis.ipynb`, `notebooks/feature_distributions.ipynb`: the EDA/separability work behind those decisions.
 3. `notebooks/mlp_classifier.ipynb`: builds the settled baseline model, reports its metrics.
-4. `notebooks/mlp_ablations.ipynb` + `MLP_Decisions_and_Findings.md`: the open-ended ablation program. The `.md` opens with a ranked summary if you just want the headline results.
+4. `MLP_Report.md` + `notebooks/mlp_report.ipynb`: in-depth writeup of the MLP ablation program, findings, per-class error mechanisms, methodology notes.
+5. `MLP_Showcase.md`: short-form summary, headline results only, defers to the report for depth.
+
+The open-ended ablation program itself (`notebooks/mlp_ablations.ipynb`) is the raw lab log behind `MLP_Report.md`, kept locally, gitignored, not in this repo.
 
 ## Layout
 
@@ -54,7 +57,8 @@ notebooks/           EDA + MLP notebooks
 results/             generated plots + cached tables (gitignored)
 data/                the RadarScenes dataset (gitignored)
 Design_Decisions.md               taxonomy/encoding/split decisions and evidence
-MLP_Decisions_and_Findings.md     MLP architecture, hyperparameters, and findings
+MLP_Report.md                     in-depth MLP writeup: findings, per-class error mechanisms, methodology
+MLP_Showcase.md                   short-form post copy (LinkedIn/Reddit), defers to MLP_Report.md
 MLP_CONFIG.json                   every trained MLP variant's config
 visualize.sh          rad_viewer launcher
 ```
@@ -68,8 +72,8 @@ visualize.sh          rad_viewer launcher
 - **`sequence_split.py`**: fixed ~70/15/15 sequence-grouped train/val/test split, cached to `results/data/sequence_split.json`. `python3 scripts/sequence_split.py`
 - **`feature_distributions.py` / `histogram_separability.py`**: picks the histogram encoding's bin range/count via separability-probe CV, not visual inspection. `python3 scripts/feature_distributions.py`, `python3 scripts/histogram_separability.py`
 - **`batch_size_selection.py`**: picks batch size + learning rate from train-split class frequencies (rare-class per-batch miss probability). `python3 scripts/batch_size_selection.py`
-- **`mlp_classifier.py`**: the baseline MLP (65→16→16→5), cached training/eval; architecture and findings in `MLP_Decisions_and_Findings.md`. `python3 scripts/mlp_classifier.py`
+- **`mlp_classifier.py`**: the baseline MLP (65→16→16→5), cached training/eval; architecture and findings in `MLP_Report.md`. `python3 scripts/mlp_classifier.py`
 - **`MLP_CONFIG.json` / `mlp_variants.py` / `class_taxonomy_experiment.py`**: registry of every trained MLP variant (see "Quick start" above for how to run one), and the taxonomy ablation that led to the `bus`/`large_vehicle` merge. `python3 scripts/mlp_variants.py <variant>`
 - **`split_sensitivity.py`**: how much macro F1 depends on split choice alone; the noise floor every other ablation is judged against. `python3 scripts/split_sensitivity.py`
-- **`pedestrian_separability.py`**: sparse-vs-dense separability probe for the `pedestrian`/`two_wheeler` pair (`MLP_Decisions_and_Findings.md` section 13).
+- **`pedestrian_separability.py`**: sparse-vs-dense separability probe for the `pedestrian`/`two_wheeler` pair, see `MLP_Report.md`.
 - **`visualize.sh`**: official `rad_viewer` Qt GUI for a full sequence, heavier (PySide6 + pyqtgraph), kept as an occasional inspection tool. `./visualize.sh [sequence_number]` (WSL2 without WSLg needs a Windows-host X server and `libxcb-cursor0`).

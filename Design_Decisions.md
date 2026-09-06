@@ -1,8 +1,6 @@
-## 1. Class grouping: merge train/truck/large_vehicle, keep bus separate, merge two_wheeler, drop animal/other_dynamic
+## 1. Class taxonomy: merge large_vehicle/truck/train/bus, merge bicycle/motorized_two_wheeler into two_wheeler, drop animal/other_dynamic
 
-RadarScenes has 12 raw classes. Trained directly on those, several
-are too rare to learn or evaluate reliably. From a 5-sequence, single-sensor sample:
-
+RadarScenes defines 12 raw classes. Several are too rare to train or evaluate reliably, per a 5-sequence, single-sensor sample:
 
 | Class | Instances (158 seq) | Pct |
 | --- | --- | --- |
@@ -18,113 +16,55 @@ are too rare to learn or evaluate reliably. From a 5-sequence, single-sensor sam
 | animal | 154 | 0.0% |
 | train | 57 | 0.0% |
 
+`train` is additionally confined to a single sequence, so no split can separate train from validation without data leakage.
 
-`train` in particular is bad enough because all train instances are contained within a single sequence, meaning they cannot be split across training and validation datasets without introducing data leakage.
-
-**Decision:** reduce to 6 classes, matching the official `radar_scenes` package's own
-`ClassificationLabel` grouping (`radar_scenes/labels.py`), this isn't just a
-convenience merge, it's the dataset authors' own recommended scheme for ML tasks:
+**Decision:** reduce to the official `radar_scenes` package's `ClassificationLabel` grouping (`radar_scenes/labels.py`), the dataset authors' own recommended scheme for ML tasks:
 
 ```
-car               -> car
-large_vehicle      -> large_vehicle
-truck              -> large_vehicle
-train              -> large_vehicle
-bus                -> bus
-bicycle            -> two_wheeler
-motorized_two_wheeler -> two_wheeler
-pedestrian         -> pedestrian
-pedestrian_group   -> pedestrian_group
-static             -> (dropped, not trained on)
-animal             -> (dropped, not trained on)
-other_dynamic       -> (dropped, not trained on)
+car                    -> car
+large_vehicle          -> large_vehicle
+truck                  -> large_vehicle
+train                  -> large_vehicle
+bus                    -> bus
+bicycle                -> two_wheeler
+motorized_two_wheeler  -> two_wheeler
+pedestrian             -> pedestrian
+pedestrian_group       -> pedestrian_group
+static                 -> (dropped)
+animal                 -> (dropped)
+other_dynamic          -> (dropped)
 ```
 
-`animal` and `other_dynamic` are dropped rather than merged because they're low-signal catch-all classes (officially mapped to None) rather than coherent categories for a classifier.
+`animal` and `other_dynamic` are dropped rather than merged: both map to `None` in the official scheme, low-signal catch-all classes rather than coherent categories.
 
-This assumes train/truck/bus share a sufficiently similar radar
-signature to large_vehicle that merging doesn't destroy separability. Planned
-EDA (RCS/point-count distributions per class) should confirm this empirically rather than
-relying on the assumption alone. Revisit if train's distribution differs substantially from
-the merged class. However, train's instance count (57) is too low to be statistically
-meaningful on its own.
+Evidence for merging large_vehicle/truck/train: a logistic regression and random forest probe (`scripts/taxonomy_separability.py`, features: median RCS, median compensated Doppler, x/y extent, Doppler spread) found large_vehicle/truck pairwise AUC of 0.632, near chance, and 74% RF confusion. Confirmed at 5-fold CV on the fixed split (decision 5): large_vehicle AUC reaches 0.78 to 0.79 but F1 only 0.23 to 0.24, unusable as a standalone class given only 23 of 130 train and val sequences contain an instance. train's 57 instances are too few to evaluate independently regardless.
 
-Merge truck, bus, and large_vehicle into a single large_vehicle class if the logistic-regression probe, trained on the full feature vector (RCS, compensated Doppler, x_rel, y_rel, doppler_spread), shows poor held-out separability between them. Support the decision with pairwise Jensen–Shannon divergence and a shuffled-label baseline, rather than relying on 1D histogram overlap.
+`bus` was initially kept separate. Pairwise evidence was mixed: well separated from large_vehicle (AUC 0.888), poorly separated from truck (AUC 0.657), and the probe's 5 hand-aggregated scalars are not the production feature representation. Once the real MLP classifier existed, its confusion matrix showed heavy bus/large_vehicle confusion, and a direct ablation confirmed the merge improves rather than masks it: combined F1 0.756 versus 0.543 and 0.492 separately (`MLP_Report.md`).
 
-### After running scripts/taxonomy_separability.py
-PROBE_FEATURES in scripts/taxonomy_separability.py:
+**Final taxonomy:** 5 classes, car, large_vehicle, two_wheeler, pedestrian, pedestrian_group, the `baseline` variant in `scripts/mlp_variants.py`. The 6-class taxonomy with bus separate remains available as the `bus_separate` variant.
 
-- `rcs`: per-instance median RCS (median of all that instance's points)
-- `vr_compensated`: per-instance median compensated radial velocity
-- `x_extent`: max(x_rel) − min(x_rel), where x_rel is each point's x_cc minus its instance's mean x_cc
-- `y_extent`: same, for y_cc
-- `doppler_spread`: per-instance median absolute deviation of vr_compensated (median-based spread, per your earlier spec)
+## 2. Histogram bin range: percentile clip, not mean plus/minus kσ
 
-large_vehicle / truck: strong case for merging. Their pairwise AUC is the weakest of the three (0.632, only slightly above chance), and the RF confusion matrix shows large_vehicle classified as truck 74% of the time. Both metrics agree, indicating a consistent effect rather than measurement noise.
-bus: the evidence is mixed. bus is well separated from large_vehicle (AUC 0.888), but poorly separated from truck (AUC 0.657, with 34% RF confusion). The data therefore supports neither treating bus as clearly distinct from both classes nor merging it with both. Whether to merge bus is a design judgment based on the acceptable level of bus/truck ambiguity, or requires additional evidence such as more sequences or richer features.
-
-### Confirmed with 5-fold CV on the fixed train+val split (decision 5)
-
-The numbers above came from a single held-out fold with no separate test set. Re-running on decision 5's fixed split (test excluded entirely) with `separability_probe.run_probe_cv`'s proper 5-fold averaging adds precision/recall/f1, which weren't available before, computed on 68 of the 130 train+val sequences, since the other 62 contain none of these 3 classes at all (only 23 sequences ever contain a large_vehicle instance, 27 for bus, 59 for truck):
-
-| class | LR AUC | LR F1 | RF AUC | RF F1 |
-| --- | --- | --- | --- | --- |
-| large_vehicle | 0.779 ± 0.041 | 0.233 ± 0.052 | 0.791 ± 0.084 | 0.244 ± 0.069 |
-| truck | 0.677 ± 0.065 | 0.544 ± 0.055 | 0.775 ± 0.053 | 0.784 ± 0.070 |
-| bus | 0.756 ± 0.070 | 0.513 ± 0.063 | 0.818 ± 0.068 | 0.554 ± 0.105 |
-
-This strengthens the large_vehicle/truck merge case rather than changing it: AUC alone appears adequate (0.78-0.79), but precision/recall expose `large_vehicle` as barely usable as its own class (RF precision 0.239, recall 0.287), most positive predictions are incorrect, and most true instances go undetected, a sharper finding than, but consistent with, the original 74% truck-confusion result. The large std on `large_vehicle` (recall ± 0.142, nearly 50% relative) reflects that only 23 sequences ever contain one, a sequence-coverage scarcity on top of the instance-count imbalance already noted above.
-
-**Resolution:** merge large_vehicle into truck (target class name kept as `large_vehicle`, per the official scheme). Keep `bus` as its own class.
-
-`bus` is kept separate despite the mixed pairwise AUC evidence: `run_separability_probe` trains on 5 hand-aggregated scalars (median RCS, median Doppler, two extents, one spread value) rather than full per-instance distributions. The production classifier will use paper-faithful per-instance histograms instead. Revisit later: if `bus` is still heavily confused with `large_vehicle`/`truck` in the real classifier's confusion matrix once real features are used, merge it in then, rather than deciding this prematurely on a simplified probe.
-
-### Revisited with the real MLP classifier
-
-The revisit condition was met: `bus` was heavily confused with `large_vehicle` in the real classifier's confusion matrix (`MLP_Decisions_and_Findings.md` section 3), and a direct ablation confirmed the merge improves the result rather than merely masking the confusion, the combined class reaches F1=0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone (`MLP_Decisions_and_Findings.md` section 4).
-
-**Final resolution:** merge `bus` into `large_vehicle` too. Going forward, the working taxonomy is 5 classes (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`), matching the `baseline` variant in `scripts/mlp_variants.py` (mlp_classifier.py's own default). The original 6 class taxonomy is kept for reference as the `bus_separate` variant.
-
-## 2. Histogram bin range: percentile clip, not mean ± kσ
-Two approaches can be used to define a feature’s histogram range while limiting the influence of outliers: [p1, p99], as implemented in feature_distributions.py and histogram_separability.py, or the common alternative of mean ± kσ.
-
-We chose the percentile-based approach because mean and standard deviation are themselves sensitive to outliers. This is particularly problematic for skewed or heavy-tailed features such as doppler_spread. For cars, for example, p1=0.0, p50≈0.01, and p99≈14.77, indicating a large concentration of near-zero values combined with a long positive tail rather than a Gaussian distribution. In this case, the tail can inflate σ (the same tail that mean ± kσ is intended to exclude), causing the resulting effective range to remain unnecessarily wide.
-
-Percentiles are based on order statistics and therefore do not make assumptions about the distribution’s shape: [p1, p99] directly defines the range containing the central 98% of observations.
+Per-feature histogram range is set to [p1, p99] (`feature_distributions.py`, `histogram_separability.py`) rather than mean ± kσ. Mean and standard deviation are themselves outlier-sensitive, particularly for skewed, heavy-tailed features such as doppler_spread: for car, p1=0.0, p50≈0.01, p99≈14.77, a near-zero mass with a long positive tail. The tail that mean ± kσ intends to exclude also inflates σ, widening the resulting range instead. Percentiles are order statistics and make no distributional assumption, directly bounding the central 98% of observations.
 
 ## 3. Histogram bin count: 16
 
-16 bins were selected from the random-forest separability probe, not from visual inspection of the histograms: macro AUC improves substantially from 8→16 bins and plateaus thereafter. That plateau holds clearly only for AUC; per-class F1 (RF) diverges by class rather than plateauing uniformly. `large_vehicle` peaks exactly at 16 (0.531) and drops at 32 (0.516), directly supporting the choice. `bus`, the smallest and most data-starved class, peaks at 4 bins (0.585) and never recovers (0.508 at 16, 0.511 at 32), additional resolution increases sparsity and noise without benefit for this class. `two_wheeler` keeps climbing through 32 (0.533→0.581) and is what pulls the macro-F1 average past 16 on its own. No single bin count is optimal across every class: 16 is a reasonable compromise, avoids 32's added sparsity and dimensionality, and happens to be specifically optimal for `large_vehicle`, the class at the center of this investigation, rather than a universal optimum.
+Selected via the RF separability probe, not visual inspection. Macro AUC improves substantially from 8 to 16 bins and plateaus after. Per-class F1 does not plateau uniformly: large_vehicle peaks at 16 (0.531 single-fold, 0.611 at 5-fold CV) and drops at 32; bus peaks at 4 and degrades with more bins, added resolution increases sparsity rather than signal for the smallest class; two_wheeler keeps improving through 32 and is the only class pulling the macro average past 16. Confirmed at 5-fold CV on the fixed split (decision 5): RF macro F1 is 0.647 at 16 versus 0.650 at 32, effectively flat. 16 bins is the selected value: a reasonable compromise across classes, and specifically optimal for large_vehicle.
 
-**Revisit at Day 6/7:** this was picked by comparing 4 candidates on one held-out sequence-grouped split, with no separate validation/test set, proportionate for choosing an encoding default, not a validated final answer. Once the real baseline classifier has a proper train/val/test split, re-check whether 16 still holds up on genuinely untouched data, the same way `bus`'s merge decision (decision 1) is flagged for revisiting once the real classifier's confusion matrix exists.
+## 4. Trusting RF/LR probe results despite using simple models
 
-### Confirmed with 5-fold CV on the fixed train+val split (decision 5), now that decision 6 makes it load-bearing
+RF and LR are simpler than a neural network, but their separability results remain valid. A 300-tree RF is a flexible nonlinear ensemble well suited to tabular histogram features, so a low AUC indicates limited signal in the encoding for that class pair, not necessarily insufficient model capacity. A raw point-based architecture could still extract more from the same points, which this probe does not assess. RF/LR agreement further indicates the observed separability is a property of the features, not a model-specific artifact.
 
-Re-run on decision 5's fixed split (test excluded) with `separability_probe.run_probe_cv`'s 5-fold averaging, since decision 6 committed to histogram encoding for the real classifier:
-
-| n_bins | model | macro AUC | macro F1 |
-| --- | --- | --- | --- |
-| 4 | RF | 0.874 | 0.577 |
-| 8 | RF | 0.911 | 0.618 |
-| 16 | RF | 0.925 | 0.647 |
-| 32 | RF | 0.928 | 0.650 |
-
-This strengthens the choice rather than changing it, and more cleanly than the original single-fold estimate: RF macro F1 16→32 is now +0.003 (essentially flat), versus +0.010 before. `large_vehicle` F1 plateaus exactly at 16 (0.611) and stays flat through 32, rather than dropping as the noisier single-fold run showed. `bus` still shows no benefit from more bins, F1 hovers ~0.49-0.51 through 16, then drops to 0.455 at 32. `two_wheeler` remains the one class that keeps climbing (0.472→0.534→0.583→0.616), but its pull on the macro average is smaller than the earlier estimate suggested. 16 remains the selected value.
-
-## 4. Trusting RF/LR probe results despite using "simple" models
-
-Random Forest and Logistic Regression are simpler than a neural network, but their separability results remain trustworthy for the following reasons. A Random Forest with 300 trees is a flexible nonlinear ensemble well suited to tabular feature vectors such as the 16-bin histograms plus doppler_spread. The main limitation is not model capacity but the hand-crafted representation: a low AUC indicates that the histogram encoding provides limited separating signal for that class pair, not that a larger model would necessarily extract more from the same 65 features. A raw point-based architecture could still learn a richer representation directly from the point sets, which this probe does not assess. Agreement between RF and LR further suggests that the observed separability is a property of the features rather than a model-specific artifact.
-
-RF's flexibility has a limitation that explains why RF and LR occasionally disagree. RF trains each tree on a bootstrap resample of the training instances, so a rare, sparsely distributed class ends up thin or absent in many resamples, similar to a rare class missing from training batches in the MLP (`MLP_Decisions_and_Findings.md` section 2). On `truck` (~31k instances, 59/130 sequences), RF clearly outperforms LR (F1 0.784 vs 0.544), sufficient data for its added flexibility to be advantageous. On `large_vehicle` (~3.3k instances, 23/130 sequences), both models land in the same poor range (F1 0.244 vs 0.233): insufficient data for RF's flexibility to yield additional signal, so its performance converges to LR's ceiling rather than exceeding it.
+The one case where RF and LR diverge is consistent with RF's own limitation: bootstrap resampling leaves a rare class thin or absent in many trees. On truck (~31k instances, 59 of 130 sequences), RF outperforms LR (F1 0.784 versus 0.544). On large_vehicle (~3.3k instances, 23 of 130 sequences), both converge to the same poor range (F1 0.244 versus 0.233): too little data for RF's flexibility to help.
 
 ## 5. Fixed train/val/test split, by sequence
 
-Every probe so far (taxonomy merge, bin range, bin count) reused the same single held-out fold across multiple candidates for selection, proportionate for choosing encoding defaults (decision 4), but it means each selected number is mildly inflated by having been chosen among candidates evaluated against that same fold, and there was no genuinely untouched data against which to report an unbiased final number.
+Decisions 1 through 3 each selected among candidates using the same single held-out fold, adequate for choosing encoding defaults but leaving every selected value mildly inflated by having been chosen against that fold, with no untouched data for an unbiased final number.
 
-**Decision:** split sequences (not instances, not scans) once into train/val/test (~70/15/15, `scripts/sequence_split.py`), via two chained `StratifiedGroupKFold` calls (grouped by sequence_name, stratified by final class at the instance level), taking the first fold each call, cached to `results/sequence_split.json` so it stays fixed rather than getting regenerated per run. Class balance held up well across all three splits despite grouping by sequence, even `bus`, the rarest class, stayed within 1.8-2.1% across train/val/test. `val` is for freely comparing candidates going forward (bin count revisit, model/architecture choices for the real classifier); `test` is set aside and checked exactly once, at the end, for the number that goes in the writeup.
+**Decision:** split by sequence, not instance or scan, once, into train/val/test (approximately 70/15/15, `scripts/sequence_split.py`), via two chained `StratifiedGroupKFold` calls, grouped by sequence and stratified by instance-level class, taking the first fold of each, cached to `results/data/sequence_split.json`. Class balance held despite grouping by sequence: even bus, the rarest class, stayed within 1.8 to 2.1% across all three splits. val supports ongoing comparisons; test is checked once, at the end.
 
-The standing split is this single deterministic assignment, not a search over candidates. `sequence_split.py`'s `select_best_split` is a separate function that does search, it enumerates multiple candidate val carves and scores each by how closely its per-class feature distributions match train's (KS statistic), but it never writes to `SPLIT_CACHE` and was never adopted: an actual run scoring 6 candidates this way found the best-matching candidate performed near the worst on macro F1 (`MLP_Decisions_and_Findings.md` Summary item 4), so picking a split this way isn't a real improvement over the plain first-fold assignment above.
+This is a fixed assignment, not a search. `sequence_split.py` also defines `select_best_split`, which searches candidate val carves by KS-statistic match to train's per-class feature distributions, but never writes to the cache and was never adopted: scoring 6 candidates this way found the best KS match performed near the worst on macro F1 (`MLP_Report.md`).
 
 ## 6. Feature representation: histogram encoding, not raw point sets
 
-Resolves the open question decision 4 flagged: whether a raw point-based architecture (consuming per-instance point sets directly, no hand-built histogram) could learn a richer representation than the histogram encoding RF/LR were probed on.
+Open question from decision 4: whether a raw point-based architecture, consuming per-instance point sets directly with no hand-built histogram, could learn a richer representation than the histogram encoding RF/LR were probed on.

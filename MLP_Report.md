@@ -1,6 +1,6 @@
 # RadarScenes MLP Classifier: Findings Report (v1.0)
 
-5 class point cloud radar object classifier (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`) trained on [RadarScenes](https://radar-scenes.com/). In depth writeup: what limits accuracy, what fixes it, whether the split methodology can be trusted, and why the taxonomy is shaped the way it is. Findings below are numbered by rank (Summary style, matching `MLP_Decisions_and_Findings.md`); every other section is supporting context, not part of that ranking. Full raw experimental log: `MLP_Decisions_and_Findings.md` (23 sections) and `notebooks/mlp_ablations.ipynb`. A 1 page version for a quick scan: `MLP_Showcase.md`.
+5 class point cloud radar object classifier (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`) trained on [RadarScenes](https://radar-scenes.com/). In depth writeup: what limits accuracy, what fixes it, whether the split methodology can be trusted, and why the taxonomy is shaped the way it is. Findings below are numbered by rank; every other section is supporting context, not part of that ranking. Full raw experimental log: `notebooks/mlp_ablations.ipynb`. A 1 page version for a quick scan: `MLP_Showcase.md`.
 
 ## Setup
 
@@ -64,6 +64,7 @@ Worth calling out separately: `stat_descriptors` (explicit per instance statisti
 - Wins 6/6 folds, mean delta +0.036 macro F1. P(6/6 by chance, assuming equivalence) approx 1.6%.
 - Gain concentrated in `two_wheeler` and `pedestrian_group`. `large_vehicle` (finding 1's sparsity casualty) shows no gain.
 - Magnitude: approximately 1/10 of finding 1's effect size. Independent, additive signal, not a reduction of the sparsity ceiling.
+- Why: no single feature in finding 1's table moved the ceiling on its own, but `combined_features` is where they act together. `spatial_extent` is rotation invariant, unlike raw `x_rel`/`y_rel`, which depend on the instance's orientation relative to the sensor. `doppler_spread` is the median absolute deviation of `vr_compensated`, a coarse micro-Doppler proxy, spread in speed across one instance's own reflections rather than a single velocity value. `two_wheeler` and `pedestrian_group` are the two classes most likely to have non-rigid or multi-body motion inside a single instance, a cyclist's legs, several overlapping people, consistent with where the gain concentrates. This project wasn't built to isolate that mechanism directly, so it's a plausible reading of the result, not a confirmed causal test like findings 1 and 3.
 
 ## Finding 3: sequence level correlation inflates apparent split variance
 
@@ -78,7 +79,7 @@ Worth calling out separately: `stat_descriptors` (explicit per instance statisti
 
 ## Per class error mechanism
 
-Per class view of how findings 1 and 3 actually show up in the confusion matrix above. Method: separability probes (logistic regression + random forest, sparse n<=2 vs dense n>=5 point regimes), two sample Kolmogorov-Smirnov (KS) test per raw feature, grouped permutation importance on the histogram encoding, softmax confidence margin on real predictions, and zero out ablation importance on the combined_features model (section 14a of the full log). No additional model retrained for this section.
+Per class view of how findings 1 and 3 actually show up in the confusion matrix above. Method: separability probes (logistic regression + random forest, sparse n<=2 vs dense n>=5 point regimes), two sample Kolmogorov-Smirnov (KS) test per raw feature, grouped permutation importance on the histogram encoding, softmax confidence margin on real predictions, and zero out ablation importance on the combined_features model. No additional model retrained for this section.
 
 **`car` -> `large_vehicle`** (73% correct, 10% predicted `large_vehicle`):
 
@@ -106,6 +107,8 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 **`pedestrian`**: highest recall of any class (0.886 val, 0.928 test), the direct counterpart of the row above. Residual confusion is with `pedestrian_group` at high point count, not with `car` or `two_wheeler`.
 
+**`pedestrian_group`**: confused as `pedestrian` at low point count, sparsity again, a sparse group and an isolated pedestrian look similar with few points to work with. Part of this is likely a label boundary problem rather than a model or data limitation: what instance count or spacing turns individual pedestrians into a "group" is not sharply defined in the source annotations, so some of this confusion may reflect a genuinely ambiguous ground truth rather than a separability gap the model could close.
+
 ## Confirmation: held out test set
 
 - Method: `evaluate_test_metrics` on the cached baseline model, computed once, after all tuning concluded. Test set untouched through every prior training, tuning, and ablation step.
@@ -129,7 +132,7 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 ## Full writeup
 
-`MLP_Decisions_and_Findings.md` (23 sections, full ablation and mechanism trace, raw log) and `notebooks/mlp_ablations.ipynb` (executed ablation program) for maximum depth. `MLP_Showcase.md` for a 1 page version. This document and `notebooks/mlp_report.ipynb` sit in between.
+`notebooks/mlp_ablations.ipynb` (executed ablation program) for maximum depth. `MLP_Showcase.md` for a 1 page version. This document and `notebooks/mlp_report.ipynb` sit in between.
 
 ## References
 
