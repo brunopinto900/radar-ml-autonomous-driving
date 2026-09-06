@@ -19,22 +19,21 @@ Row normalized, val set, cached baseline model. `car` and `pedestrian` are the s
 
 ## Finding 1: sparsity is the primary performance ceiling
 
-- Method: bucket the already trained baseline model's val predictions by instance point count (`evaluate_by_point_count`), no retraining, compared against 10 independently retrained model/feature variants.
+- Method: bucket the already trained baseline model's val predictions by instance point count (`evaluate_by_point_count`), no retraining, compared against 14 independently retrained model/feature variants.
 
-| variant | what changed |
-|---|---|
-| `hidden8` / `hidden32` / `hidden64` | `hidden_dim` in {8, 32, 64} vs baseline 16 |
-| `deep10` | depth 10 layers vs baseline 2 (with batch norm) |
-| `range_sc` | `range_sc` in place of `doppler_spread` |
-| `azimuth_extent` | `azimuth_extent` added |
-| `spatial_extent` | `spatial_extent` in place of `x_rel`/`y_rel` |
-| `n_points` | `n_points` added as extra scalar |
-| `raw_counts` | raw bin counts in place of fractions |
-| `stat_descriptors` | explicit per instance statistics (mean/median/std of `rcs`, `vr_compensated`, `radial`, `azimuth_sc`, `doppler_spread`) in place of histograms |
-| `gaussian_range` / `quantile_bins` | gaussian range / quantile based bin edges |
-| `rcs_extent_only` | `rcs_extent` added alone |
-| `spatial_extent_added` | `spatial_extent` added alongside `x_rel`/`y_rel` |
-| `no_vr_compensated` | `vr_compensated` removed |
+| variant | what changed | comment |
+|---|---|---|
+| `hidden8` / `hidden32` / `hidden64` | `hidden_dim` in {8, 32, 64} vs baseline 16 | more or less capacity, same points per instance |
+| `deep10` | depth 10 layers vs baseline 2 (with batch norm) | more depth, same points per instance |
+| `range_sc` | `range_sc` in place of `doppler_spread` | different feature, same underlying points |
+| `azimuth_extent` | `azimuth_extent` added | extra scalar, no new signal |
+| `spatial_extent` | `spatial_extent` in place of `x_rel`/`y_rel` | rotation invariant, still no gain alone |
+| `n_points` | `n_points` added as extra scalar | telling the model the count isn't the same as having more points |
+| `raw_counts` | raw bin counts in place of fractions | same histogram, different normalization |
+| `stat_descriptors` | explicit per instance statistics (mean/median/std of `rcs`, `vr_compensated`, `radial`, `azimuth_sc`, `doppler_spread`) in place of histograms | different encoding of the same points, see below |
+| `gaussian_range` / `quantile_bins` | gaussian range / quantile based bin edges | different bin edges, same 65 raw points |
+| `rcs_extent_only` | `rcs_extent` added alone | extra scalar, no new signal |
+| `spatial_extent_added` | `spatial_extent` added alongside `x_rel`/`y_rel` | extra scalar, no new signal |
 
 All null, every result inside the noise floor above.
 
@@ -64,7 +63,7 @@ Worth calling out separately: `stat_descriptors` (explicit per instance statisti
 - Wins 6/6 folds, mean delta +0.036 macro F1. P(6/6 by chance, assuming equivalence) approx 1.6%.
 - Gain concentrated in `two_wheeler` and `pedestrian_group`. `large_vehicle` (finding 1's sparsity casualty) shows no gain.
 - Magnitude: approximately 1/10 of finding 1's effect size. Independent, additive signal, not a reduction of the sparsity ceiling.
-- Why: no single feature in finding 1's table moved the ceiling on its own, but `combined_features` is where they act together. `spatial_extent` is rotation invariant, unlike raw `x_rel`/`y_rel`, which depend on the instance's orientation relative to the sensor. `doppler_spread` is the median absolute deviation of `vr_compensated`, a coarse micro-Doppler proxy, spread in speed across one instance's own reflections rather than a single velocity value. `two_wheeler` and `pedestrian_group` are the two classes most likely to have non-rigid or multi-body motion inside a single instance, a cyclist's legs, several overlapping people, consistent with where the gain concentrates. This project wasn't built to isolate that mechanism directly, so it's a plausible reading of the result, not a confirmed causal test like findings 1 and 3.
+- Why: no single feature helped alone, but together they add information the model didn't have before. `spatial_extent` captures instance size regardless of orientation. `doppler_spread` captures how much the points inside one instance differ in speed, relevant for objects with moving parts, a cyclist's legs, several people in a group. `two_wheeler` and `pedestrian_group` are exactly those classes. Most likely explanation, not a confirmed causal test like findings 1 and 3.
 
 ## Finding 3: sequence level correlation inflates apparent split variance
 
@@ -105,7 +104,7 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 `vr_compensated` dominates the model but reads near zero for both a stationary pedestrian and an idling or tangentially moving `two_wheeler`. Local instance density at that value favors `pedestrian` roughly 12:1 in sparse, so a true `two_wheeler` there is outvoted. Confusion is one directional since `pedestrian` has near zero mass in `two_wheeler`'s higher speed range. Same feature as finding 3, different question: there it explains cross fold score variance, here it explains the confusion itself.
 
-**`pedestrian`**: highest recall of any class (0.886 val, 0.928 test), the direct counterpart of the row above. Residual confusion is with `pedestrian_group` at high point count, not with `car` or `two_wheeler`.
+**`pedestrian`**: highest recall of any class (0.886 val, 0.928 test), the direct counterpart of the row above. Residual confusion is with `pedestrian_group`, not `car` or `two_wheeler`: modest and non monotonic with point count, 2.3% predicted as `pedestrian_group` at 1 to 2 points, 8.0% at 3 to 5, 4.1% at 6 to 10. True pedestrian instances almost never reach higher point counts (49 at 6 to 10, none at 11+), so there isn't enough data to say whether the rate keeps rising.
 
 **`pedestrian_group`**: confused as `pedestrian` at low point count, sparsity again, a sparse group and an isolated pedestrian look similar with few points to work with. Part of this is likely a label boundary problem rather than a model or data limitation: what instance count or spacing turns individual pedestrians into a "group" is not sharply defined in the source annotations, so some of this confusion may reflect a genuinely ambiguous ground truth rather than a separability gap the model could close.
 
