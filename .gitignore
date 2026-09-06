@@ -15,3 +15,6 @@ __pycache__/
 scripts/regime_specialist_mlps.py
 scripts/shape_features_academic.py
 scripts/sparse_rcs_mechanism_check.py
+scripts/report.py
+MLP_Decisions_and_Findings.md
+notebooks/mlp_ablations.ipynb
