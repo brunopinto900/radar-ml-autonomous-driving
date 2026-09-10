@@ -117,17 +117,25 @@ def build_stat_features(
     build_histogram_features, since each instance's mean/median/std depends only on its own
     points, nothing to fit on train alone and reuse on val/test. `"std"` uses ddof=0
     (population, not sample) so a 1-point instance gets a well-defined 0 instead of NaN (ddof=1
-    divides by n-1, undefined at n=1). `extra_features` (default doppler_spread) are appended
-    as-is via `.first()`, already one value per instance broadcast to every point row,
-    aggregating them like a point-level feature would be degenerate (every point in an instance
-    shares the identical value, so e.g. std would always be 0)."""
+    divides by n-1, undefined at n=1). `"maxAD"` is max(|x - instance median|), also well-defined
+    0 at n=1; unlike std (averaged squared deviation) it's driven by the single most extreme
+    point in the instance, an outlier-sensitive dispersion measure, not a more robust one.
+    `extra_features` (default doppler_spread) are appended as-is via `.first()`, already one
+    value per instance broadcast to every point row, aggregating them like a point-level feature
+    would be degenerate (every point in an instance shares the identical value, so e.g. std would
+    always be 0)."""
     df = df.loc[df["group"].isin(classes)]
     group = df.groupby(INSTANCE_COLS)
 
     stat_cols = []
     for feature, stats in feature_stats.items():
         for stat in stats:
-            col = group[feature].std(ddof=0) if stat == "std" else getattr(group[feature], stat)()
+            if stat == "std":
+                col = group[feature].std(ddof=0)
+            elif stat == "maxAD":
+                col = group[feature].apply(lambda s: (s - s.median()).abs().max())
+            else:
+                col = getattr(group[feature], stat)()
             col.name = f"{feature}_{stat}"
             stat_cols.append(col)
     stat_df = pd.concat(stat_cols, axis=1)

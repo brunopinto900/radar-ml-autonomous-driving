@@ -170,6 +170,35 @@
       "extra_features": ["doppler_spread", "spatial_extent"],
       "run_kwargs": {}
     },
+    "maxad_stats": {
+      "_note": "Follow-up to stat_descriptors (section 11): swaps its central-tendency/dispersion stats for {median, maxAD} per feature instead of adding maxAD on top of what was already there. mean dropped as redundant with median (both central tendency); std swapped for maxAD (max(|x - instance median|), histogram_separability.build_stat_features, well-defined 0 at n=1 like std's ddof=0) wherever std was used - maxAD is driven by the single most extreme point rather than an averaged deviation, an outlier-sensitive dispersion measure, not a more robust one, the opposite tradeoff from std. rcs: mean+median+std -> median+maxAD. vr_compensated: mean+median -> median (no dispersion stat before, none added - stat_descriptors deliberately left vr's spread to doppler_spread alone, this keeps that choice). radial/azimuth_sc: std -> maxAD (no central tendency before, none added).",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "maxad_stats",
+      "extra_features": ["doppler_spread"],
+      "feature_stats": {
+        "rcs": ["median", "maxAD"],
+        "vr_compensated": ["median"],
+        "radial": ["maxAD"],
+        "azimuth_sc": ["maxAD"]
+      },
+      "run_kwargs": {}
+    },
+    "maxad_stats_uniform": {
+      "_note": "Follow-up to maxad_stats: applies {median, maxAD} uniformly across x_rel, y_rel, vr_compensated, range_sc, rcs (histogram_separability.build_stat_features), rather than maxad_stats's per-feature-tailored set (radial/azimuth_sc instead of the raw point-level columns, some features single-stat). Same point-level identities the baseline histogram encoding covers (rcs, vr_compensated, x_rel, y_rel) plus range_sc, each reduced to just its median (central tendency) and maxAD (max(|x - instance median|), outlier-sensitive dispersion) instead of a 16-bin histogram. epochs raised to 200 (vs the 50 default/maxad_stats used) to rule out undertraining as a factor in maxad_stats's below-noise-floor macro F1 (0.650 vs baseline's 0.686).",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "maxad_stats_uniform",
+      "extra_features": ["doppler_spread"],
+      "feature_stats": {
+        "x_rel": ["median", "maxAD"],
+        "y_rel": ["median", "maxAD"],
+        "vr_compensated": ["median", "maxAD"],
+        "range_sc": ["median", "maxAD"],
+        "rcs": ["median", "maxAD"]
+      },
+      "run_kwargs": {"epochs": 200}
+    },
     "no_vr_compensated": {
       "_note": "Causal test of section 15's fold-instability mechanism: baseline's 4 histograms minus vr_compensated (rcs, x_rel, y_rel only), doppler_spread unchanged. If two_wheeler's fold-to-fold F1 spread narrows once the model can no longer lean on the one feature that's both unstable across folds for two_wheeler (mean pairwise KS 0.370, section 15) and the single most load-bearing feature overall (zero-out drop -0.331, section 14a), that's direct causal evidence for the mechanism, not just correlation. Expect absolute macro F1 and two_wheeler F1 to drop substantially (vr_compensated carries real signal), the question is specifically whether the spread across the 6 split-sensitivity folds shrinks, ideally checked as relative spread (spread / mean) too, since a lower F1 baseline has less room to vary regardless of mechanism.",
       "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
