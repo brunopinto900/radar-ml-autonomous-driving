@@ -21,6 +21,10 @@ results/fold_stability/*
 results/class_imbalance/*
 !results/class_imbalance/class_counts_merged.png
 !results/radarscenes_sensor_layout.png
+!results/deepreflecs/
+results/deepreflecs/*
+!results/deepreflecs/deepreflecs_confusion_matrix.png
+!results/deepreflecs/comparison_f1_bar.png
 __pycache__/
 .ipynb_checkpoints/
 scripts/regime_specialist_mlps.py

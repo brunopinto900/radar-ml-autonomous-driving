@@ -673,9 +673,20 @@ def run_training(
     Writes to `output_dir` (default MLP_DIR), pass a different directory (e.g. MLP_DIR /
     f"epochs_{epochs}") to keep a run's cache separate from the default baseline instead of
     overwriting it. Returns (model, history, X_test, y_test), X_test/y_test are returned but
-    not evaluated here; call evaluate_test explicitly once."""
+    not evaluated here; call evaluate_test explicitly once.
+
+    `splits` is resolved to its actual dict (load_split() if None) before building the cache
+    key: two calls with different class taxonomies, feature sets, or candidate splits but
+    otherwise identical hyperparameters must not collide on the same cache_key, otherwise a
+    call with a changed `classes`/`features`/`extra_features`/`normalize`/`splits` would
+    silently load and return a model trained on the previous (different) taxonomy/features/
+    split instead of retraining."""
+    if splits is None:
+        splits = load_split()
+
     cache_key = {
-        "n_bins": N_BINS, "bin_range": bin_range, "feature_stats": feature_stats,
+        "classes": classes, "splits": splits, "features": features, "extra_features": extra_features,
+        "normalize": normalize, "n_bins": N_BINS, "bin_range": bin_range, "feature_stats": feature_stats,
         "standardize_extra": standardize_extra, "hidden_dim": hidden_dim,
         "n_hidden_layers": n_hidden_layers, "dropout": dropout, "weight_decay": weight_decay,
         "batch_norm": batch_norm, "epochs": epochs, "batch_size": batch_size, "lr": lr,
