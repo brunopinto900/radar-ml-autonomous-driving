@@ -30,7 +30,7 @@ from taxonomy_separability import INSTANCE_COLS
 # --- hyperparameters ---
 CONV_DIM = 16  # paper Fig. 4: first shared per-point layer's width
 POINT_DIM = 32  # paper Fig. 4: second shared per-point layer's width (== 2*CONV_DIM, GCL output)
-LEARNING_RATE = 1e-3
+LEARNING_RATE = 4e-5  # matches mlp_classifier.py's baseline LR
 EPOCHS = 100
 BATCH_SIZE = 128
 RANDOM_STATE = 0
