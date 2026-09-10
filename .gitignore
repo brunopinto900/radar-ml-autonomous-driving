@@ -14,6 +14,8 @@ results/*
 results/mlp/*
 !results/mlp/mlp_confusion_matrix.png
 !results/mlp/mlp_point_count_curve.png
+!results/mlp/failure_case_two_wheeler.png
+!results/mlp/failure_case_two_wheeler_with_camera.png
 !results/fold_stability/
 results/fold_stability/*
 !results/fold_stability/two_wheeler_vr_compensated_by_fold.png
@@ -33,3 +35,5 @@ scripts/sparse_rcs_mechanism_check.py
 scripts/report.py
 MLP_Decisions_and_Findings.md
 notebooks/mlp_ablations.ipynb
+results/mlp/failure_case_two_wheeler.png
+results/mlp/failure_case_two_wheeler_with_camera.png
