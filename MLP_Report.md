@@ -46,7 +46,17 @@ All null, every result inside the noise floor above.
 
 Worth calling out separately: `stat_descriptors` (explicit per instance statistics, mean/median/std, replacing the 65 dim histogram encoding entirely) is the one variant above that did not just land flat. Macro F1 0.658 vs baseline's 0.686, inside the overall noise floor but only barely, and `pedestrian`'s own f1 dropped outside its class specific noise floor (-0.075 vs a spread of 0.073), the only such case across every variant tested. Why it did not help: histograms and explicit statistics are just two different summaries of the same limited raw points, and the ceiling above is upstream of that choice, how many real points an instance has to begin with, not how those points get encoded. Removing the histogram's binning step entirely and still landing at the same ceiling is itself evidence for that, not against the histogram encoding specifically.
 
-A follow-up complicated that last point, and is now resolved: re-running `stat_descriptors` on `x_rel`/`y_rel`/`vr_compensated`/`rcs` plus `range_sc` instead of `radial`/`azimuth_sc` (`stat_descriptors_5features`/`maxad_stats_5features`) cleared baseline, and a 16-bin quantile histogram on the same 5 features (`quantile_bins_5features`) landed in the same neighborhood, so it isn't statistics beating histograms, it's `range_sc` itself. Run through the same 6-fold split-sensitivity check used for `combined_features` below: all four encodings (equal-width histogram, quantile histogram, raw mean/median/std, raw median/maxAD) beat baseline in 6/6 folds, mean delta +0.02 to +0.03 macro F1, delta std 0.007-0.009. Confirmed real, not noise, and encoding-invariant. This is a second validated positive result alongside `combined_features`, and the one genuine exception to this section's fixed-point-count conclusion. Full tables, per-class breakdown, and how this compares to DeepReflecs' further architecture-only effect on top of it: `model_comparison.md`.
+A follow-up complicated that last point, and is now resolved: re-running `stat_descriptors` on `x_rel`/`y_rel`/`vr_compensated`/`rcs` plus `range_sc` instead of `radial`/`azimuth_sc` (`stat_descriptors_5features`/`maxad_stats_5features`) cleared baseline, and a 16-bin quantile histogram on the same 5 features (`quantile_bins_5features`) landed in the same neighborhood, so it isn't statistics beating histograms, it's `range_sc` itself. Run through the same 6-fold split-sensitivity check used for `combined_features` below, all four encodings beat baseline in 6/6 folds with tight, consistent deltas:
+
+| Variant | Reduction | Mean macro F1 | Mean delta vs baseline | Delta std | Wins |
+|---|---|---|---|---|---|
+| Baseline | 16-bin histogram, 4 features | 0.692 | -- | -- | -- |
+| `histogram_5features` | 16-bin histogram | 0.714 | +0.023 | 0.007 | 6/6 |
+| `quantile_bins_5features` | 16-bin quantile histogram | 0.723 | +0.031 | 0.009 | 6/6 |
+| `stat_descriptors_5features` | mean/median/std | 0.725 | +0.034 | 0.007 | 6/6 |
+| `maxad_stats_5features` | median/maxAD | 0.723 | +0.032 | 0.008 | 6/6 |
+
+All four land within 0.011 of each other regardless of encoding, so it isn't statistics beating histograms or one bin scheme beating another, it's `range_sc` itself, confirmed real, not noise. This is a second validated positive result alongside `combined_features`, and the one genuine exception to this section's fixed-point-count conclusion. Per-class breakdown and how this compares to DeepReflecs' further architecture-only effect on top of it: `model_comparison.md`.
 
 ## Finding 2: one validated positive result, combined_features
 
