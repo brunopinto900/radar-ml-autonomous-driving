@@ -72,8 +72,31 @@ A follow-up complicated that last point, and is now resolved: re-running `stat_d
 - `DeepReflecs` (Ulrich, Glaser and Timm, arXiv:2010.09273, 2021, reimplemented: shared per-point layers, global max-pool context, no fixed-length encoding) trained on the same `x_rel`/`y_rel`/`vr_compensated`/`rcs`/`range_sc` feature set as finding 1's `range_sc` result, same 6 fold split sensitivity procedure.
 - Mean macro F1 0.735 vs baseline's 0.692 (+0.044, wins 6/6 folds).
 - Decomposes into two independently validated pieces: `range_sc` alone, on any of the four MLP encodings, accounts for +0.031; the point-set architecture on top of that, paired directly against `quantile_bins_5features` on the identical feature set and folds, accounts for a further +0.012 (6/6 wins).
-- So most of DeepReflecs' advantage over baseline is the missing feature, not the network. Per class, the architecture-only effect is reliably real for `car` alone; `pedestrian_group`'s gain is entirely the feature effect, architecture there is a slight net negative.
-- Full tables, per-class real-vs-noise verdicts: `deepreflecs.md`, `model_comparison.md`.
+- So most of DeepReflecs' advantage over baseline is the missing feature, not the network.
+
+Per class, 6-fold mean plus or minus std, best per row in bold:
+
+| Class | Baseline | `quantile_bins_5features` (feature effect) | DeepReflecs |
+|---|---|---|---|
+| `car` | 0.863 ± 0.020 | 0.865 ± 0.020 | **0.877 ± 0.016** |
+| `large_vehicle` | 0.719 ± 0.065 | 0.696 ± 0.037 | **0.735 ± 0.049** |
+| `two_wheeler` | 0.571 ± 0.133 | 0.644 ± 0.097 | **0.650 ± 0.097** |
+| `pedestrian` | 0.674 ± 0.030 | 0.694 ± 0.036 | **0.703 ± 0.030** |
+| `pedestrian_group` | 0.630 ± 0.045 | **0.716 ± 0.038** | 0.710 ± 0.042 |
+
+Splitting DeepReflecs vs baseline into the same two pieces per class (wins counted across the 6 folds, not a delta-vs-std eyeball):
+
+| Class | DeepReflecs vs baseline | DeepReflecs vs `quantile_bins_5features` (architecture only) |
+|---|---|---|
+| `car` | Real. 6/6 folds, +0.014 | Real, small. 6/6 folds, +0.012 |
+| `large_vehicle` | Noise. Only 4/6 folds, +0.016, inside its own spread | Real, but recovers ground `quantile_bins_5features` lost on this class, not a DeepReflecs-over-baseline win. 6/6 folds, +0.039 |
+| `two_wheeler` | Real. 6/6 folds, +0.079 | Real but negligible, almost all the gain is feature choice. 6/6 folds, +0.006 |
+| `pedestrian` | Real. 6/6 folds, +0.029 | Borderline, right at its own noise edge. 6/6 folds, +0.009 |
+| `pedestrian_group` | Real, strongest of all. 6/6 folds, +0.081 | Not real, architecture loses here. Only 2/6 folds, −0.006 |
+
+Net: DeepReflecs beats baseline on 4 of 5 classes for real. Once feature choice is separated out, the architecture effect alone is only clearly real for `car`, negligible for `two_wheeler`/`pedestrian`, and slightly reversed for `pedestrian_group`. Most of the per-class story belongs to `range_sc`, not the network.
+
+Full derivation and additional encodings: `deepreflecs.md`, `model_comparison.md`.
 
 ## Finding 4: sequence level correlation inflates apparent split variance
 
