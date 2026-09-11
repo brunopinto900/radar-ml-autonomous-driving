@@ -1,6 +1,6 @@
 # RadarScenes MLP Classifier: Findings Report (v1.0)
 
-5 class point cloud radar object classifier (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`) trained on [RadarScenes](https://radar-scenes.com/). In depth writeup: what limits accuracy, what fixes it, whether the split methodology can be trusted, and why the taxonomy is shaped the way it is. Findings below are numbered by rank; every other section is supporting context, not part of that ranking. Full raw experimental log: `notebooks/mlp_ablations.ipynb`. A 1 page version for a quick scan: `MLP_Showcase.md`.
+5 class point cloud radar object classifier (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`) trained on [RadarScenes](https://radar-scenes.com/). In depth writeup: what limits accuracy, what fixes it, whether the split methodology can be trusted, and why the taxonomy is shaped the way it is. Findings below are numbered by rank; every other section is supporting context, not part of that ranking. Full raw experimental log: `notebooks/mlp_ablations.ipynb`.
 
 ## Setup
 
@@ -15,7 +15,7 @@
 
 ![Baseline confusion matrix](results/mlp/mlp_confusion_matrix.png)
 
-Row normalized, val set, cached baseline model. `car` and `pedestrian` are the strongest classes, `two_wheeler` the weakest. Mechanisms behind each class's errors: findings 1 and 3 below, synthesized per class at the end.
+Row normalized, val set, cached baseline model. `car` and `pedestrian` are the strongest classes, `two_wheeler` the weakest. Mechanisms behind each class's errors: findings 1 and 4 below, synthesized per class at the end.
 
 ## Finding 1: sparsity is the primary performance ceiling
 
@@ -42,9 +42,11 @@ All null, every result inside the noise floor above.
 - Macro F1: 0.381 at 1 point/instance, 0.764 at 5 points/instance. Same trained model, point count is the only variable.
 - `large_vehicle`: F1 0.037 at n=1, 0.995 at n=11+ (62% of val instances have 6+ points). Size is not determinable from a single point.
 - `car`: F1 flat at 0.80 to 0.88 across all point counts. RCS and Doppler alone separate it at n=1.
-- Conclusion: additional points aggregated per instance (multi scan, multi sensor) address the ceiling directly. Feature or capacity changes at fixed point count do not.
+- Conclusion: additional points aggregated per instance (multi scan, multi sensor) address the ceiling directly. Feature or capacity changes at fixed point count mostly do not, with one confirmed exception below.
 
 Worth calling out separately: `stat_descriptors` (explicit per instance statistics, mean/median/std, replacing the 65 dim histogram encoding entirely) is the one variant above that did not just land flat. Macro F1 0.658 vs baseline's 0.686, inside the overall noise floor but only barely, and `pedestrian`'s own f1 dropped outside its class specific noise floor (-0.075 vs a spread of 0.073), the only such case across every variant tested. Why it did not help: histograms and explicit statistics are just two different summaries of the same limited raw points, and the ceiling above is upstream of that choice, how many real points an instance has to begin with, not how those points get encoded. Removing the histogram's binning step entirely and still landing at the same ceiling is itself evidence for that, not against the histogram encoding specifically.
+
+A follow-up complicated that last point, and is now resolved: re-running `stat_descriptors` on `x_rel`/`y_rel`/`vr_compensated`/`rcs` plus `range_sc` instead of `radial`/`azimuth_sc` (`stat_descriptors_5features`/`maxad_stats_5features`) cleared baseline, and a 16-bin quantile histogram on the same 5 features (`quantile_bins_5features`) landed in the same neighborhood, so it isn't statistics beating histograms, it's `range_sc` itself. Run through the same 6-fold split-sensitivity check used for `combined_features` below: all four encodings (equal-width histogram, quantile histogram, raw mean/median/std, raw median/maxAD) beat baseline in 6/6 folds, mean delta +0.02 to +0.03 macro F1, delta std 0.007-0.009. Confirmed real, not noise, and encoding-invariant. This is a second validated positive result alongside `combined_features`, and the one genuine exception to this section's fixed-point-count conclusion. Full tables, per-class breakdown, and how this compares to DeepReflecs' further architecture-only effect on top of it: `model_comparison.md`.
 
 ## Finding 2: one validated positive result, combined_features
 
@@ -63,9 +65,17 @@ Worth calling out separately: `stat_descriptors` (explicit per instance statisti
 - Wins 6/6 folds, mean delta +0.036 macro F1. P(6/6 by chance, assuming equivalence) approx 1.6%.
 - Gain concentrated in `two_wheeler` and `pedestrian_group`. `large_vehicle` (finding 1's sparsity casualty) shows no gain.
 - Magnitude: approximately 1/10 of finding 1's effect size. Independent, additive signal, not a reduction of the sparsity ceiling.
-- Why: no single feature helped alone, but together they add information the model didn't have before. `spatial_extent` captures instance size regardless of orientation. `doppler_spread` captures how much the points inside one instance differ in speed, relevant for objects with moving parts, a cyclist's legs, several people in a group. `two_wheeler` and `pedestrian_group` are exactly those classes. Most likely explanation, not a confirmed causal test like findings 1 and 3.
+- Why: no single feature helped alone, but together they add information the model didn't have before. `spatial_extent` captures instance size regardless of orientation. `doppler_spread` captures how much the points inside one instance differ in speed, relevant for objects with moving parts, a cyclist's legs, several people in a group. `two_wheeler` and `pedestrian_group` are exactly those classes. Most likely explanation, not a confirmed causal test like findings 1 and 4.
 
-## Finding 3: sequence level correlation inflates apparent split variance
+## Finding 3: DeepReflecs point-set network, feature choice vs architecture
+
+- `DeepReflecs` (Ulrich, Glaser and Timm, arXiv:2010.09273, 2021, reimplemented: shared per-point layers, global max-pool context, no fixed-length encoding) trained on the same `x_rel`/`y_rel`/`vr_compensated`/`rcs`/`range_sc` feature set as finding 1's `range_sc` result, same 6 fold split sensitivity procedure.
+- Mean macro F1 0.735 vs baseline's 0.692 (+0.044, wins 6/6 folds).
+- Decomposes into two independently validated pieces: `range_sc` alone, on any of the four MLP encodings, accounts for +0.031; the point-set architecture on top of that, paired directly against `quantile_bins_5features` on the identical feature set and folds, accounts for a further +0.012 (6/6 wins).
+- So most of DeepReflecs' advantage over baseline is the missing feature, not the network. Per class, the architecture-only effect is reliably real for `car` alone; `pedestrian_group`'s gain is entirely the feature effect, architecture there is a slight net negative.
+- Full tables, per-class real-vs-noise verdicts: `deepreflecs.md`, `model_comparison.md`.
+
+## Finding 4: sequence level correlation inflates apparent split variance
 
 - `StratifiedGroupKFold` matches instance count ratios per split but cannot split a sequence. A class whose instance count is concentrated in few sequences has its val distribution set by which of those sequences are assigned to val, independent of the overall ratio.
 - Mechanism, traced for `two_wheeler` (largest fold to fold F1 spread in the project, 0.386): a single tracked object detected across many consecutive scans (e.g. a stationary or idling cyclist) generates hundreds of correlated instances under one sequence.
@@ -78,7 +88,7 @@ Worth calling out separately: `stat_descriptors` (explicit per instance statisti
 
 ## Per class error mechanism
 
-Per class view of how findings 1 and 3 actually show up in the confusion matrix above. Method: separability probes (logistic regression + random forest, sparse n<=2 vs dense n>=5 point regimes), two sample Kolmogorov-Smirnov (KS) test per raw feature, grouped permutation importance on the histogram encoding, softmax confidence margin on real predictions, and zero out ablation importance on the combined_features model. No additional model retrained for this section.
+Per class view of how findings 1 and 4 actually show up in the confusion matrix above. Method: separability probes (logistic regression + random forest, sparse n<=2 vs dense n>=5 point regimes), two sample Kolmogorov-Smirnov (KS) test per raw feature, grouped permutation importance on the histogram encoding, softmax confidence margin on real predictions, and zero out ablation importance on the combined_features model. No additional model retrained for this section.
 
 **`car` -> `large_vehicle`** (73% correct, 10% predicted `large_vehicle`):
 
@@ -102,7 +112,7 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 | local density ratio, pedestrian:two_wheeler at `vr_compensated` approx 0, sparse | approx 12:1 |
 | same ratio, dense | approx 1:1 |
 
-`vr_compensated` dominates the model but reads near zero for both a stationary pedestrian and an idling or tangentially moving `two_wheeler`. Local instance density at that value favors `pedestrian` roughly 12:1 in sparse, so a true `two_wheeler` there is outvoted. Confusion is one directional since `pedestrian` has near zero mass in `two_wheeler`'s higher speed range. Same feature as finding 3, different question: there it explains cross fold score variance, here it explains the confusion itself.
+`vr_compensated` dominates the model but reads near zero for both a stationary pedestrian and an idling or tangentially moving `two_wheeler`. Local instance density at that value favors `pedestrian` roughly 12:1 in sparse, so a true `two_wheeler` there is outvoted. Confusion is one directional since `pedestrian` has near zero mass in `two_wheeler`'s higher speed range. Same feature as finding 4, different question: there it explains cross fold score variance, here it explains the confusion itself.
 
 **`pedestrian`**: highest recall of any class (0.886 val, 0.928 test), the direct counterpart of the row above. Residual confusion is with `pedestrian_group`, not `car` or `two_wheeler`: modest and non monotonic with point count, 2.3% predicted as `pedestrian_group` at 1 to 2 points, 8.0% at 3 to 5, 4.1% at 6 to 10. True pedestrian instances almost never reach higher point counts (49 at 6 to 10, none at 11+), so there isn't enough data to say whether the rate keeps rising.
 
@@ -112,7 +122,7 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 - Method: `evaluate_test_metrics` on the cached baseline model, computed once, after all tuning concluded. Test set untouched through every prior training, tuning, and ablation step.
 - Test macro F1: 0.699. Val macro F1: 0.686. Delta +0.013, inside the 0.651 to 0.734 noise floor.
-- No overfitting detected. `two_wheeler` shows the largest val to test delta, consistent with its fold to fold instability (finding 3).
+- No overfitting detected. `two_wheeler` shows the largest val to test delta, consistent with its fold to fold instability (finding 4).
 
 ## On the data
 
@@ -120,10 +130,10 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 ![Class distribution, final taxonomy](results/class_imbalance/class_counts_merged.png)
 
-- Root cause behind findings 1 and 3 is the same: RadarScenes is a naturalistically collected, fixed dataset. Common classes get broad incidental coverage, rare classes and rare subtypes do not. No amount of splitting or modeling fixes thin coverage that was never collected. `car` and `pedestrian_group` alone make up most of train, `two_wheeler` is the smallest of the five final classes.
+- Root cause behind findings 1 and 4 is the same: RadarScenes is a naturalistically collected, fixed dataset. Common classes get broad incidental coverage, rare classes and rare subtypes do not. No amount of splitting or modeling fixes thin coverage that was never collected. `car` and `pedestrian_group` alone make up most of train, `two_wheeler` is the smallest of the five final classes.
 - `large_vehicle` groups `large_vehicle`, `truck`, `train`, and (after a later revisit) `bus`, following RadarScenes' own recommended `ClassificationLabel` scheme, not an ad hoc merge. Two reasons forced it: `train` has only 57 raw instances, all inside one sequence, impossible to split into train/val without leakage; a held out probe found `large_vehicle`/`truck` pairwise separability near chance (AUC 0.632, 74% confused as each other), confirmed at proper cross validation (`large_vehicle` alone: precision 0.24, recall 0.29, barely usable, only 23 of 158 sequences ever contain one). `bus` was initially kept separate on mixed evidence, but the real MLP's confusion matrix later showed it heavily confused with `large_vehicle` anyway, merging raised the combined class's F1 to 0.756, above either `bus` (0.543) or `large_vehicle` (0.492) alone.
-- `two_wheeler`'s instability (finding 3) has a second contributing factor beyond sequence concentration: it merges two physically different velocity regimes (`bicycle`, `motorized_two_wheeler`, the latter only 4.7% of `two_wheeler` instances), a taxonomy simplification, not a data defect. Mixed evidence on how much this specifically drives the instability, sequence concentration through `vr_compensated` (finding 3) remains the better supported explanation.
-- Practical read: `two_wheeler` does not need a better model, it needs more independent sequences and richer point counts per instance for that specific class. Findings 1 and 3 are two symptoms of the same underlying data gap, not separate problems.
+- `two_wheeler`'s instability (finding 4) has a second contributing factor beyond sequence concentration: it merges two physically different velocity regimes (`bicycle`, `motorized_two_wheeler`, the latter only 4.7% of `two_wheeler` instances), a taxonomy simplification, not a data defect. Mixed evidence on how much this specifically drives the instability, sequence concentration through `vr_compensated` (finding 4) remains the better supported explanation.
+- Practical read: `two_wheeler` does not need a better model, it needs more independent sequences and richer point counts per instance for that specific class. Findings 1 and 4 are two symptoms of the same underlying data gap, not separate problems.
 
 ## Next step
 
@@ -131,10 +141,12 @@ Dense is far more separable by probe AUC but shows the higher real error rate. N
 
 ## Full writeup
 
-`notebooks/mlp_ablations.ipynb` (executed ablation program) for maximum depth. `MLP_Showcase.md` for a 1 page version. This document and `notebooks/mlp_report.ipynb` sit in between.
+`notebooks/mlp_ablations.ipynb` (executed ablation program) for maximum depth. This document and `notebooks/mlp_report.ipynb` sit in between.
 
 ## References
 
 O. Schumann et al., "RadarScenes: A Real-World Radar Point Cloud Data Set for Automotive Applications," arXiv:2104.02493, 2021. [https://arxiv.org/abs/2104.02493](https://arxiv.org/abs/2104.02493)
 
 M. Tatarchenko and K. Rambach, "Histogram-based Deep Learning for Automotive Radar," arXiv:2303.02975, 2023. [https://arxiv.org/abs/2303.02975](https://arxiv.org/abs/2303.02975)
+
+M. Ulrich, C. Glaser and F. Timm, "DeepReflecs: Deep Learning for Automotive Object Classification with Radar Reflections," arXiv:2010.09273, 2021. [https://arxiv.org/abs/2010.09273](https://arxiv.org/abs/2010.09273)

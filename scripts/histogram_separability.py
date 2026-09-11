@@ -133,7 +133,8 @@ def build_stat_features(
             if stat == "std":
                 col = group[feature].std(ddof=0)
             elif stat == "maxAD":
-                col = group[feature].apply(lambda s: (s - s.median()).abs().max())
+                abs_dev = (df[feature] - group[feature].transform("median")).abs()
+                col = abs_dev.groupby([df[c] for c in INSTANCE_COLS]).max()
             else:
                 col = getattr(group[feature], stat)()
             col.name = f"{feature}_{stat}"

@@ -184,11 +184,11 @@
       },
       "run_kwargs": {}
     },
-    "maxad_stats_uniform": {
+    "maxad_stats_5features": {
       "_note": "Follow-up to maxad_stats: applies {median, maxAD} uniformly across x_rel, y_rel, vr_compensated, range_sc, rcs (histogram_separability.build_stat_features), rather than maxad_stats's per-feature-tailored set (radial/azimuth_sc instead of the raw point-level columns, some features single-stat). Same point-level identities the baseline histogram encoding covers (rcs, vr_compensated, x_rel, y_rel) plus range_sc, each reduced to just its median (central tendency) and maxAD (max(|x - instance median|), outlier-sensitive dispersion) instead of a 16-bin histogram. epochs raised to 200 (vs the 50 default/maxad_stats used) to rule out undertraining as a factor in maxad_stats's below-noise-floor macro F1 (0.650 vs baseline's 0.686).",
       "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
       "class_groups_base": "MLP_CLASS_GROUPS",
-      "output_dir": "maxad_stats_uniform",
+      "output_dir": "maxad_stats_5features",
       "extra_features": ["doppler_spread"],
       "feature_stats": {
         "x_rel": ["median", "maxAD"],
@@ -197,6 +197,40 @@
         "range_sc": ["median", "maxAD"],
         "rcs": ["median", "maxAD"]
       },
+      "run_kwargs": {"epochs": 200}
+    },
+    "stat_descriptors_5features": {
+      "_note": "Isolates maxad_stats_5features's confound: its +0.020 macro F1 gain over baseline could come from maxAD specifically, or simply from finally computing per-instance statistics on the same Cartesian features the baseline histogram itself bins (x_rel, y_rel, vr_compensated, rcs, plus range_sc), rather than stat_descriptors/maxad_stats's radial/azimuth_sc set. Same 5 features and same 200 epochs as maxad_stats_5features, but with mean/median/std (stat_descriptors's original statistic set) instead of median/maxAD. Landing near maxad_stats_5features's 0.706 would mean the feature set was doing the work, not maxAD; landing near stat_descriptors's original 0.658 would mean maxAD specifically matters.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "stat_descriptors_5features",
+      "extra_features": ["doppler_spread"],
+      "feature_stats": {
+        "x_rel": ["mean", "median", "std"],
+        "y_rel": ["mean", "median", "std"],
+        "vr_compensated": ["mean", "median", "std"],
+        "range_sc": ["mean", "median", "std"],
+        "rcs": ["mean", "median", "std"]
+      },
+      "run_kwargs": {"epochs": 200}
+    },
+    "histogram_5features": {
+      "_note": "Completes the 5-feature encoding comparison (alongside stat_descriptors_5features, maxad_stats_5features, quantile_bins_5features): baseline's own 16-bin equal-width histogram, extended to the same x_rel/y_rel/vr_compensated/range_sc/rcs feature set (adds range_sc to baseline's original 4) rather than baseline's own bin_range='percentile' default left implicit. Same doppler_spread/200-epoch convention as the other _5features variants, for a fair encoding-vs-encoding comparison on identical features. Distinct from the older range_sc variant (same features minus doppler_spread, 50 epochs, section 5): this one matches the others' training recipe so encoding is the only thing that varies across all four.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "histogram_5features",
+      "features": ["rcs", "vr_compensated", "x_rel", "y_rel", "range_sc"],
+      "extra_features": ["doppler_spread"],
+      "run_kwargs": {"epochs": 200}
+    },
+    "quantile_bins_5features": {
+      "_note": "Re-runs section 12's quantile_bins test (unequal-width bins, edges placed for roughly equal training mass per bin, histogram_separability.fit_bin_edges's range_method='quantile') on maxad_stats_5features's 5-feature set (baseline's rcs/vr_compensated/x_rel/y_rel plus range_sc) instead of baseline's original 4, at 200 epochs to match. Tests whether a smarter bin placement plus the same expanded feature set closes the gap with maxad_stats_5features's 0.706, or whether any fixed-bin discretization loses to real-valued per-instance statistics regardless of bin placement, given this dataset's point sparsity.",
+      "classes": ["car", "large_vehicle", "two_wheeler", "pedestrian", "pedestrian_group"],
+      "class_groups_base": "MLP_CLASS_GROUPS",
+      "output_dir": "quantile_bins_5features",
+      "features": ["rcs", "vr_compensated", "x_rel", "y_rel", "range_sc"],
+      "extra_features": ["doppler_spread"],
+      "bin_range": "quantile",
       "run_kwargs": {"epochs": 200}
     },
     "no_vr_compensated": {
