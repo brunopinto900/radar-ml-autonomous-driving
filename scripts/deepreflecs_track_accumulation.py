@@ -344,6 +344,8 @@ def run_windowed_split_sensitivity(
     range_sc_mode: str = ACCUMULATION_BASELINE_RANGE_SC_MODE,
     n_seeds: int = 10,
     base_random_state: int = 0,
+    conv_dim: int = CONV_DIM,
+    point_dim: int = POINT_DIM,
     output_dir=ACCUMULATION_BASELINE_DIR,
 ) -> pd.DataFrame:
     """The accumulation baseline (default N=5, stride=1, raw range_sc), trained/
@@ -375,14 +377,30 @@ def run_windowed_split_sensitivity(
         fold = row["fold"]
         splits = {"train": row["train_sequences"], "val": row["val_sequences"], "test": row["test_sequences"]}
         fold_dir = output_dir / f"fold_{fold}"
-        print(f"=== accumulation baseline (N={n}, range_sc_mode={range_sc_mode}) fold {fold} (max_ks={row['max_ks']:.4f}) ===")
-        run_windowed_training(df, n=n, stride=stride, range_sc_mode=range_sc_mode, output_dir=fold_dir, splits=splits)
+        print(f"=== accumulation baseline (N={n}, range_sc_mode={range_sc_mode}, conv_dim={conv_dim}, point_dim={point_dim}) fold {fold} (max_ks={row['max_ks']:.4f}) ===")
+        run_windowed_training(
+            df, n=n, stride=stride, range_sc_mode=range_sc_mode, output_dir=fold_dir, splits=splits,
+            conv_dim=conv_dim, point_dim=point_dim,
+        )
         metrics_df, _, _ = evaluate_windowed_val_metrics(
-            df, n=n, stride=stride, range_sc_mode=range_sc_mode, output_dir=fold_dir, splits=splits
+            df, n=n, stride=stride, range_sc_mode=range_sc_mode, output_dir=fold_dir, splits=splits,
+            conv_dim=conv_dim, point_dim=point_dim,
         )
         macro_f1 = metrics_df["f1"].mean()
         print(f"fold {fold} macro F1: {macro_f1:.4f}")
         rows.append({"fold": fold, "max_ks": row["max_ks"], "macro_f1": macro_f1})
+
+        # Each fold allocates fresh, large (X_train/X_val, up to ~m_max x n_instances)
+        # GPU tensors inside run_windowed_training/evaluate_windowed_val_metrics; once
+        # those go out of scope here, PyTorch's caching allocator frees them internally
+        # but does not return the memory to the driver, so repeated large alloc/free
+        # cycles across 6 sequential folds in one process can fragment the cache until a
+        # later fold's allocation fails even though nominal usage is well under the
+        # card's limit (observed twice: identical "CUDA error: unknown error" at the
+        # same fold boundary on a 6GB GPU, both times with nothing else running).
+        # empty_cache() releases those unused cached blocks back to the driver between
+        # folds, keeping fragmentation from accumulating.
+        torch.cuda.empty_cache()
 
     summary = pd.DataFrame(rows)
     print()

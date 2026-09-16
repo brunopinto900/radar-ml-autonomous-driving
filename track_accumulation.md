@@ -177,3 +177,44 @@ Same accumulated data (N = 5, raw `range_sc`), same fixed canonical split (not o
 
 - Within 0.004 macro F1 of each other. A histogram encoding can't see per-point spatial pattern or order at all, it only sees the fraction of a window's points landing in each quantile bin. If DeepReflecs' point-set architecture were exploiting some fine-grained pattern the histogram structurally can't represent, a real gap would show up here. It doesn't.
 - Leans the interpretation toward accumulation helping via a more representative aggregate summary of a sparse, noisy point cloud (denoising), not toward either architecture learning something temporal-pattern-specific.
+
+The N=1→5→10 curve already saturated hard, most of the gain was captured by 5 scans of dumb pooling
+
+## Capacity ablation: doubled CONV_DIM/POINT_DIM
+
+Same accumulation baseline (N = 5, stride = 1, raw `range_sc`), same 6 folds, only `CONV_DIM`/`POINT_DIM` doubled (16/32 to 32/64), to check whether the baseline model is under-capacity for the richer windowed input distribution.
+
+| fold | baseline (16/32) | doubled (32/64) | delta |
+|---|---|---|---|
+| 0 | 0.781 | 0.788 | +0.008 |
+| 1 | 0.826 | 0.833 | +0.008 |
+| 2 | 0.824 | 0.828 | +0.004 |
+| 3 | 0.770 | 0.779 | +0.009 |
+| 4 | 0.811 | 0.814 | +0.003 |
+| 5 | 0.789 | 0.801 | +0.013 |
+| mean | 0.800 | 0.807 | +0.007 |
+| std | 0.023 | 0.022 | |
+
+6/6 folds improve, same direction every time, so this is a real effect, not noise. But the size of it, +0.007 mean macro F1, is smaller than the fold-to-fold noise band itself (std ~0.022) and far smaller than the accumulation effect (+0.065). Capacity was a real but minor bottleneck. Not worth pursuing further, the win here was accumulation, not architecture size.
+
+## Temporal variation feature: first test of across-scan dynamics
+
+First attempt at giving a model access to something order-0 pooling structurally cannot see: not more points, but how a scan's own points change from one scan to the next within a window. Two engineered scalars, one for `rcs` one for `vr_compensated`, added to the quantile-bin MLP (N=5, raw `range_sc`, no `doppler_spread`) alongside the existing 5 histogram-encoded features:
+
+- Per scan value: median of that scan's own points (mean rejected, collapses the two-reflector bimodal structure the car worked example already showed is real).
+- Per window: mean absolute consecutive diff across those per-scan medians, divided by number of gaps (scans in the window minus 1), so window length at the start of a track doesn't confound the statistic.
+
+Single canonical split (same one used for the architecture comparison above, not fold-validated):
+
+| class | no temporal variation | with temporal variation | delta |
+|---|---|---|---|
+| car | 0.899 | 0.902 | +0.003 |
+| large_vehicle | 0.741 | 0.748 | +0.007 |
+| two_wheeler | 0.783 | 0.791 | +0.008 |
+| pedestrian | 0.820 | 0.814 | -0.006 |
+| pedestrian_group | 0.833 | 0.833 | 0.000 |
+| macro F1 | 0.815 | 0.818 | +0.003 |
+
+Flat. `two_wheeler` and `pedestrian_group` are the classes the erratic-vs-stable RCS/Doppler story is actually about, and neither shows a real move, `pedestrian_group` didn't budge at all. All deltas sit well inside the fold-to-fold noise band this project has consistently measured (std ~0.02 to 0.03), well short of a signal worth a 6-fold check.
+
+Likely reason: this statistic only measures magnitude of scan to scan change, not its shape. It cannot distinguish a scatterer moving randomly from one that oscillates in a structured, class-characteristic way, both produce the same average jump size. A transition model (discretize into bins, count which bin follows which, a bigram over quantile bins instead of a scalar diff) would test the shape hypothesis directly. This result rules out the cheap magnitude-only version, not the underlying idea.
