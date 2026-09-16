@@ -218,3 +218,16 @@ Single canonical split (same one used for the architecture comparison above, not
 Flat. `two_wheeler` and `pedestrian_group` are the classes the erratic-vs-stable RCS/Doppler story is actually about, and neither shows a real move, `pedestrian_group` didn't budge at all. All deltas sit well inside the fold-to-fold noise band this project has consistently measured (std ~0.02 to 0.03), well short of a signal worth a 6-fold check.
 
 Likely reason: this statistic only measures magnitude of scan to scan change, not its shape. It cannot distinguish a scatterer moving randomly from one that oscillates in a structured, class-characteristic way, both produce the same average jump size. A transition model (discretize into bins, count which bin follows which, a bigram over quantile bins instead of a scalar diff) would test the shape hypothesis directly. This result rules out the cheap magnitude-only version, not the underlying idea.
+
+Same feature, same fixed split, retried at N=10 instead of N=5 (control run at N=10 without the feature was needed too, this pipeline had only ever been run at N=5 before):
+
+| class | N=10 no temporal variation | N=10 with temporal variation | delta |
+|---|---|---|---|
+| car | 0.909 | 0.917 | +0.008 |
+| large_vehicle | 0.755 | 0.778 | +0.023 |
+| two_wheeler | 0.803 | 0.824 | +0.021 |
+| pedestrian | 0.841 | 0.843 | +0.002 |
+| pedestrian_group | 0.846 | 0.861 | +0.015 |
+| macro F1 | 0.831 | 0.845 | +0.014 |
+
+Not flat this time, roughly 4 to 5x the macro F1 movement seen at N=5, and concentrated in `large_vehicle`, `two_wheeler`, `pedestrian_group`, the classes the stability/erratic story was about, while `pedestrian` barely moves despite being the original example of erratic RCS. Likely explanation: 5 scans (4 gaps) wasn't enough window for a diff-based statistic to average over cleanly, 10 scans (9 gaps) gives a less noisy statistic and more span to see real dynamics in. Single split, not fold-validated yet, first real signal in the temporal-structure line of investigation so far.
