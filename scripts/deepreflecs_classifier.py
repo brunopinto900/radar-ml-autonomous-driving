@@ -33,6 +33,7 @@ POINT_DIM = 32  # paper Fig. 4: second shared per-point layer's width (== 2*CONV
 LEARNING_RATE = 4e-5  # matches mlp_classifier.py's baseline LR
 EPOCHS = 100
 BATCH_SIZE = 128
+EVAL_BATCH_SIZE = 1024  # val/test inference batch, see _predict_in_batches
 RANDOM_STATE = 0
 # ------------------------
 
@@ -128,6 +129,23 @@ def build_point_sets(
         point_sets.append(feat_matrix[positions])
         labels.append(class_idx[positions[0]])
     return point_sets, np.array(labels, dtype="int64")
+
+
+def _predict_in_batches(
+    model: "DeepReflecs", X: torch.Tensor, mask: torch.Tensor, batch_size: int = EVAL_BATCH_SIZE
+) -> torch.Tensor:
+    """Runs model(X, mask) in chunks along the instance dimension instead of one
+    unbatched forward pass. DeepReflecs' per-point layers and per-instance masked max
+    pool never mix information across instances, so chunking changes nothing
+    numerically, only memory footprint. A full-batch forward pass is fine at single-
+    scan point counts (m_max ~45) but runs out of GPU memory once window pooling
+    (track-accumulation branch) pushes m_max into the hundreds."""
+    model.eval()
+    logits = []
+    with torch.no_grad():
+        for start in range(0, len(X), batch_size):
+            logits.append(model(X[start : start + batch_size], mask[start : start + batch_size]))
+    return torch.cat(logits, dim=0)
 
 
 def pad_to_fixed(point_sets: list[np.ndarray], m_max: int) -> tuple[np.ndarray, np.ndarray]:
@@ -253,9 +271,8 @@ def train_deepreflecs(
         train_loss = epoch_loss / n
         train_acc = epoch_correct / n
 
-        model.eval()
-        with torch.no_grad():
-            val_acc = (model(X_val_t, mask_val_t).argmax(dim=1) == y_val_t).float().mean().item()
+        val_logits = _predict_in_batches(model, X_val_t, mask_val_t)
+        val_acc = (val_logits.argmax(dim=1) == y_val_t).float().mean().item()
 
         history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
         print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}")
@@ -374,11 +391,9 @@ def _evaluate_metrics(
     regenerated fresh, cheap regardless."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
-    model.eval()
-    with torch.no_grad():
-        X_t = torch.tensor(X, device=DEVICE)
-        mask_t = torch.tensor(mask, device=DEVICE)
-        y_pred = model(X_t, mask_t).argmax(dim=1).cpu().numpy()
+    X_t = torch.tensor(X, device=DEVICE)
+    mask_t = torch.tensor(mask, device=DEVICE)
+    y_pred = _predict_in_batches(model, X_t, mask_t).argmax(dim=1).cpu().numpy()
 
     if metrics_cache.exists() and metrics_cache.stat().st_mtime >= model_cache.stat().st_mtime:
         metrics_df = pd.read_json(metrics_cache, orient="index")

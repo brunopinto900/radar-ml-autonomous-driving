@@ -116,7 +116,10 @@ def object_detections(detections: np.ndarray, track_id: bytes) -> np.ndarray:
 
 
 # attributes relevant for training: RCS, Doppler, range, azimuth, position, sensor
-OBJECT_ATTRS = ["sensor_id", "range_sc", "azimuth_sc", "rcs", "vr", "vr_compensated", "x_cc", "y_cc"]
+OBJECT_ATTRS = [
+    "sensor_id", "range_sc", "azimuth_sc", "rcs", "vr", "vr_compensated",
+    "x_cc", "y_cc", "x_seq", "y_seq",
+]
 
 
 def object_instance(detections: np.ndarray, track_id: bytes) -> dict:
