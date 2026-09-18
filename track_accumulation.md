@@ -231,3 +231,188 @@ Same feature, same fixed split, retried at N=10 instead of N=5 (control run at N
 | macro F1 | 0.831 | 0.845 | +0.014 |
 
 Not flat this time, roughly 4 to 5x the macro F1 movement seen at N=5, and concentrated in `large_vehicle`, `two_wheeler`, `pedestrian_group`, the classes the stability/erratic story was about, while `pedestrian` barely moves despite being the original example of erratic RCS. Likely explanation: 5 scans (4 gaps) wasn't enough window for a diff-based statistic to average over cleanly, 10 scans (9 gaps) gives a less noisy statistic and more span to see real dynamics in. Single split, not fold-validated yet, first real signal in the temporal-structure line of investigation so far.
+
+## Shape/sign attempts: three ways to keep more than magnitude, three losses
+
+Three follow-up attempts to give the temporal feature access to sign or shape instead of just magnitude of scan-to-scan change, all at N=10, all on top of the same 5-feature histogram, no `doppler_spread`:
+
+- **Signed diff vector**: one column per gap (9 for N=10) per feature, signed (not absolute) consecutive diff of per-scan medians, right-aligned to the target scan, zero-padded for windows shorter than N.
+- **Diff vector + window length**: the above plus one extra column, how many real scans the window has, meant to let the model tell padded columns from real ones.
+- **Transition matrix**: a 4x4 bin-to-bin transition count per feature (which quantile bin the previous scan's median was in vs. the current one), normalized by number of transitions present, no padding needed since the matrix shape never depends on window length.
+
+| variant | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| N=10 control | 0.909 | 0.755 | 0.803 | 0.841 | 0.846 | 0.831 |
+| N=10 + summed absolute diff (magnitude only) | 0.917 | 0.778 | 0.824 | 0.843 | 0.861 | **0.845** |
+| N=10 + transition matrix (keeps sign) | 0.911 | 0.757 | 0.827 | 0.842 | 0.858 | 0.839 |
+| N=10 + signed diff vector | 0.910 | 0.758 | 0.814 | 0.845 | 0.855 | 0.836 |
+| N=10 + diff vector + window length flag | 0.911 | 0.756 | 0.814 | 0.840 | 0.847 | 0.834 |
+
+All three shape/sign-preserving variants land behind the dumb magnitude-only statistic, consistently, not scattered randomly around it. The window-length flag also didn't move the diff vector's number in the direction hoped for (0.834 vs 0.836 without it), a single scalar buried among 99 columns wasn't enough for the MLP to learn to use it as a padding indicator. Read together with the leading "denoising, not shape-learning" explanation for why accumulation helps at all (DeepReflecs vs. histogram MLP tie, `Architecture comparison` section above), this argues against an RNN or transformer paying off here: three independent attempts to expose order/shape found nothing beyond what magnitude alone already gave, and the data (sparse per-scan point counts, thin track counts for the rarer classes) is a plausible reason there isn't much more to find, not just bad luck.
+
+## Pushing N further
+
+Base accumulation for the histogram MLP hadn't actually saturated by N=10 the way the DeepReflecs point-set sweep suggested; it keeps climbing at N=20:
+
+| | N=10 | N=20 |
+|---|---|---|
+| control | 0.831 | 0.852 |
+| + temporal variation | 0.845 | 0.859 |
+| temporal variation's own delta | +0.014 | +0.007 |
+
+| class | N=20 control | N=20 + temporal variation | delta |
+|---|---|---|---|
+| car | 0.920 | 0.922 | +0.002 |
+| large_vehicle | 0.772 | 0.772 | 0.000 |
+| two_wheeler | 0.834 | 0.851 | +0.017 |
+| pedestrian | 0.859 | 0.866 | +0.007 |
+| pedestrian_group | 0.875 | 0.884 | +0.009 |
+
+Absolute macro F1 keeps improving with N (0.845 to 0.859), but the temporal feature's own marginal contribution roughly halved between N=10 and N=20, and `large_vehicle` went from the biggest single beneficiary at N=10 (+0.023) to no benefit at all at N=20. Reads like a bigger pooled window starts to implicitly carry some of what the engineered variation feature was adding on its own, the two sources of "more temporal information" overlap rather than stack cleanly. `two_wheeler` is the one class still getting its full benefit from the explicit feature at N=20. Single split, not fold-validated.
+
+## Post-hoc probability smoothing along the track
+
+Free addition on top of the current best model (N=10 + temporal variation), no retraining: since a track's label can't actually change mid-track (`check_label_consistency`), any scan-to-scan flip in the model's raw predictions along one track is necessarily a mistake, not a real change. Averaged each class's softmax probability over a causal trailing window of the last 5 windows within the same track (a moving-average low-pass filter over the probability trajectory), then took the argmax of the smoothed probabilities instead of the raw ones.
+
+| class | raw | smoothed (K=5) | delta |
+|---|---|---|---|
+| car | 0.917 | 0.920 | +0.003 |
+| large_vehicle | 0.778 | 0.783 | +0.005 |
+| two_wheeler | 0.824 | 0.829 | +0.006 |
+| pedestrian | 0.843 | 0.846 | +0.003 |
+| pedestrian_group | 0.861 | 0.867 | +0.006 |
+| macro F1 | 0.845 | 0.849 | +0.005 |
+
+5/5 classes improve, same direction, unlike the shape/sign attempts above which scattered around the baseline. Consistent with what smoothing actually is here: not new information, denoising of flicker using a constraint (constant label per track) the model was never explicitly given. Stacks on top of whatever else this branch settles on. Single split, not fold-validated.
+
+## Cross-sensor track handoff, not just more time on one sensor
+
+Every experiment above used sensor 2 only (`build_points_table.py`'s `SENSOR_ID = 2` filter). RadarScenes' 4 sensors cover different, overlapping parts of the scene, and a `track_id` is a stable ground-truth identity across sensor handoffs, not per-sensor (confirmed earlier: 14/24 tracks on one checked sequence were seen by 3 different sensors over their lifetime; same-instant cross-sensor detections are essentially never seen, 1 overlap in 500k+, so this is about extending a track's real coverage over time, not enriching one instant). Verified directly that all 4 sensors share one global clock (overlapping timestamp ranges, same units, zero exact-timestamp collisions across sensors within a sequence), so a plain sort by timestamp, dropping sensor_id from the grouping, correctly interleaves multi-sensor detections in true chronological order with no change to the window-building logic itself.
+
+Symmetric rule, same in train and inference, to avoid a train/serve mismatch: build every window from whichever sensor(s) are actually detecting that track right now, not an enriched multi-sensor union at train time against a sensor-2-only reality at inference. `build_and_save_points_table(sensor_id=None)` keeps every sensor's points instead of filtering to one.
+
+N=10 + temporal variation, same split, same config, sensor-2-only vs all-sensor:
+
+| class | sensor-2 only | all-sensor (handoff) | delta |
+|---|---|---|---|
+| car | 0.917 | 0.925 | +0.008 |
+| large_vehicle | 0.778 | 0.769 | -0.009 |
+| two_wheeler | 0.824 | 0.831 | +0.007 |
+| pedestrian | 0.843 | 0.883 | +0.040 |
+| pedestrian_group | 0.861 | 0.861 | 0.000 |
+| macro F1 | 0.845 | 0.854 | +0.009 |
+
+Real gain, and from a different axis than N: more real detections per track through sensor handoffs, not more real time spanned on one sensor. Test-set support roughly 2.5x larger (car support 76,572 vs 29,958), confirming tracks are genuinely picking up far more real detections, not just being padded out. `pedestrian` jumped hard (+0.040), `large_vehicle` dropped slightly (-0.009), not a uniform win across classes. Reaches at N=10 what sensor-2-alone needed N=20 for (0.852 control). Single split, not fold-validated.
+
+Pushed further, sensor-2-only N=50 + temporal variation and all-sensor N=20 + temporal variation:
+
+| N | control | + temporal variation | delta |
+|---|---|---|---|
+| 5 | 0.815 | 0.818 | +0.003 |
+| 10 | 0.831 | 0.845 | +0.014 |
+| 20 | 0.852 | 0.859 | +0.007 |
+| 50 | 0.858 | 0.867 | +0.009 |
+
+Sensor-2-only N=50 + temporal variation reached macro F1 0.867, new best for that line, and not a clean monotonic shrink of the temporal feature's own delta (+0.014 at N=10, +0.007 at N=20, back up to +0.009 at N=50), more consistent with single-split noise on that specific number than a real trend. Every class improved from N=20 to N=50 with the feature included though, first time that's been true across the board (`large_vehicle` had been flat between N=10 and N=20, +0.012 here).
+
+All-sensor N=20 + temporal variation:
+
+| class | sensor-2 N=20 + temporal | all-sensor N=20 + temporal | delta |
+|---|---|---|---|
+| car | 0.922 | 0.936 | +0.014 |
+| large_vehicle | 0.772 | 0.797 | +0.025 |
+| two_wheeler | 0.851 | 0.850 | -0.001 |
+| pedestrian | 0.866 | 0.897 | +0.031 |
+| pedestrian_group | 0.884 | 0.874 | -0.010 |
+| macro F1 | 0.859 | 0.871 | +0.012 |
+
+Macro F1 0.871, new overall best in the branch, and cross-sensor handoff at N=20 beats pushing N to 50 on one sensor alone (0.871 vs 0.867). More real detections per track is turning out to be a stronger lever than more real time on a single sensor. Same asymmetric pattern as the N=10 comparison: `pedestrian` gains hard both times, `pedestrian_group` gives a little back both times.
+
+Caveat that applied to both all-sensor numbers above (0.854 and 0.871): `build_windowed_temporal_features` normalized the variation statistic by number of gaps, which silently assumes every gap is the same real duration. True for sensor-2-only (~0.074s apart, always), not true once sensor handoffs mix short (multi-sensor overlap) and long (single-sensor) gaps into the same window. Fixed to normalize by total elapsed real time instead (last scan's timestamp minus first, in seconds), a no-op for sensor-2-only (gaps already uniform there) but a real change for all-sensor.
+
+Re-ran all-sensor N=20 + temporal variation with the fix:
+
+| class | uncorrected | delta_t corrected | delta |
+|---|---|---|---|
+| car | 0.936 | 0.933 | -0.003 |
+| large_vehicle | 0.797 | 0.794 | -0.003 |
+| two_wheeler | 0.850 | 0.841 | -0.009 |
+| pedestrian | 0.897 | 0.894 | -0.003 |
+| pedestrian_group | 0.874 | 0.869 | -0.005 |
+| macro F1 | 0.871 | 0.866 | -0.005 |
+
+Small but real correction, all classes down a little, `two_wheeler` the most. Changes the earlier read: corrected all-sensor N=20 (0.866) is no longer clearly ahead of sensor-2-only N=50 (0.867), they're essentially tied, not a clean win for cross-sensor over more real time. The uncorrected version was quietly overstating the cross-sensor advantage. Neither being dominant is a good sign for combining them, all-sensor N=50 + temporal variation is running next.
+
+## Stacking both axes: all-sensor, N=50, temporal variation
+
+Both real levers found so far (more real time on a track via larger N, more real detections per track via cross-sensor handoff) combined in one run, delta_t-corrected temporal variation, same canonical split:
+
+| class | sensor-2 N=50 + temporal | all-sensor N=20 + temporal | all-sensor N=50 + temporal | delta vs best of the two |
+|---|---|---|---|---|
+| car | 0.926 | 0.933 | 0.940 | +0.007 |
+| large_vehicle | 0.784 | 0.794 | 0.814 | +0.020 |
+| two_wheeler | 0.858 | 0.841 | 0.853 | -0.005 |
+| pedestrian | 0.876 | 0.894 | 0.905 | +0.011 |
+| pedestrian_group | 0.890 | 0.869 | 0.894 | +0.004 |
+| macro F1 | 0.867 | 0.866 | **0.881** | +0.014 |
+
+The two axes stack rather than cancel or merely tie: 0.881 clears both individual bests (0.867, 0.866) by roughly the same margin either one had over the other. Only `two_wheeler` gives a little back relative to its sensor-2 N=50 number, every other class sets a new high. New overall best in the branch. Single split, not fold-validated.
+
+## Post-hoc smoothing revisited: helps at N=10, doesn't at N=50
+
+Same K=5 causal probability-smoothing technique as before, applied to the new best model (all-sensor N=50 + temporal variation):
+
+| class | raw | smoothed (K=5) | delta |
+|---|---|---|---|
+| car | 0.940 | 0.940 | 0.000 |
+| large_vehicle | 0.814 | 0.813 | -0.001 |
+| two_wheeler | 0.853 | 0.851 | -0.002 |
+| pedestrian | 0.905 | 0.902 | -0.003 |
+| pedestrian_group | 0.894 | 0.893 | -0.001 |
+| macro F1 | 0.881 | 0.880 | -0.001 |
+
+Flat to slightly negative, the opposite of N=10 (5/5 classes improved there). Likely explanation: at N=50 with stride 1, consecutive windows already share 49 of 50 scans, so the raw probability trajectory is already heavily autocorrelated before any explicit smoothing is applied, there's little flicker left for a moving average to remove. Stacking K=5 on top mostly just risks dragging a stale window's probability across a real class transition. Reads as smoothing being useful in proportion to how noisy the raw per-window signal is, not a free win regardless of N. Not worth keeping at N=50, best number stays the raw (unsmoothed) 0.881.
+
+## Consolidated results
+
+DeepReflecs (point-set) family, single canonical split:
+
+| variant | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| single-scan baseline (pre-branch, x_cc/y_cc) | 0.880 | 0.744 | 0.673 | 0.724 | 0.726 | 0.749 |
+| N=1 control (this branch, x_seq/y_seq) | 0.879 | 0.752 | 0.674 | 0.723 | 0.731 | 0.752 |
+| N=5, broadcast range_sc | 0.904 | 0.782 | 0.761 | 0.798 | 0.809 | 0.811 |
+| N=5, raw range_sc | 0.905 | 0.782 | 0.759 | 0.800 | 0.812 | 0.812 |
+| N=10 | 0.909 | 0.786 | 0.776 | 0.820 | 0.834 | 0.825 |
+
+Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless noted, same split:
+
+| variant | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| N=5 (clean 5-feature) | 0.899 | 0.741 | 0.783 | 0.820 | 0.833 | 0.815 |
+| N=5 + temporal variation | 0.902 | 0.748 | 0.791 | 0.814 | 0.833 | 0.818 |
+| N=10 | 0.909 | 0.755 | 0.803 | 0.841 | 0.846 | 0.831 |
+| N=10 + temporal variation | 0.917 | 0.778 | 0.824 | 0.843 | 0.861 | 0.845 |
+| N=10 + transition matrix | 0.911 | 0.757 | 0.827 | 0.842 | 0.858 | 0.839 |
+| N=10 + signed diff vector | 0.910 | 0.758 | 0.814 | 0.845 | 0.855 | 0.836 |
+| N=10 + diff vector + window length | 0.911 | 0.756 | 0.814 | 0.840 | 0.847 | 0.834 |
+| N=20 | 0.920 | 0.772 | 0.834 | 0.859 | 0.875 | 0.852 |
+| N=20 + temporal variation | 0.922 | 0.772 | 0.851 | 0.866 | 0.884 | 0.859 |
+| N=10 + temporal variation + post-hoc smoothing | 0.920 | 0.783 | 0.829 | 0.846 | 0.867 | 0.849 |
+| N=50 | 0.918 | 0.768 | 0.837 | 0.882 | 0.887 | 0.858 |
+| N=50 + temporal variation | 0.926 | 0.784 | 0.858 | 0.876 | 0.890 | 0.867 |
+| N=10 + temporal variation, all-sensor (uncorrected gap normalization) | 0.925 | 0.769 | 0.831 | 0.883 | 0.861 | 0.854 |
+| N=20 + temporal variation, all-sensor (uncorrected gap normalization) | 0.936 | 0.797 | 0.850 | 0.897 | 0.874 | 0.871 |
+| N=20 + temporal variation, all-sensor (delta_t corrected) | 0.933 | 0.794 | 0.841 | 0.894 | 0.869 | 0.866 |
+| N=50 + temporal variation, all-sensor (delta_t corrected) | 0.940 | 0.814 | 0.853 | 0.905 | 0.894 | **0.881** |
+| N=50 + temporal variation, all-sensor + post-hoc smoothing (K=5) | 0.940 | 0.813 | 0.851 | 0.902 | 0.893 | 0.880 |
+
+6-fold validated (val split, mean across folds, different rotating splits, not the canonical one above):
+
+| variant | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 | std |
+|---|---|---|---|---|---|---|---|
+| accumulation baseline, N=5 raw (16/32 capacity) | 0.902 | 0.793 | 0.723 | 0.787 | 0.796 | 0.800 | 0.023 |
+| same, doubled capacity (32/64) | 0.907 | 0.793 | 0.736 | 0.794 | 0.807 | 0.807 | 0.022 |
+| single-scan baseline, 6-fold (reference, pre-branch) | — | — | — | — | — | 0.735 | 0.025 |
+
+Best single-split number in the branch is all-sensor N=50 + temporal variation at 0.881 (raw, unsmoothed), stacking both real levers found this session: more real time per track (large N) and more real detections per track (cross-sensor handoff). Post-hoc smoothing helps at N=10 (+0.005) but not at N=50 (-0.001), likely because heavily overlapping N=50 windows are already autocorrelated before any smoothing. Nothing here is fold-validated. Everything from the shape/sign attempts onward is from one session's worth of exploration on the same canonical split. Next step: fold-validate this configuration before treating 0.881 as an established number rather than a single-split result.

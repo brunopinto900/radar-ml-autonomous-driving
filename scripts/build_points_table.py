@@ -15,8 +15,12 @@ ALL_SEQUENCES = sorted(
     key=lambda name: int(name.split("_")[1]),
 )
 
-def sequence_points(sequence_name: str, sensor_id: int = SENSOR_ID) -> pd.DataFrame:
-    """One row per point, restricted to one sensor's points belonging to a tracked object."""
+def sequence_points(sequence_name: str, sensor_id: int | None = SENSOR_ID) -> pd.DataFrame:
+    """One row per point belonging to a tracked object. sensor_id=None keeps every
+    sensor's points (a track's own timestamps are unique across sensors within a
+    sequence, verified directly, so no two sensors' detections of the same track ever
+    collide in the (sequence_name, timestamp, track_id) instance key), restricted to
+    one sensor's points otherwise."""
     with h5py.File(DATA_ROOT / sequence_name / "radar_data.h5", "r") as f:
         radar_data = f["radar_data"][:]
 
@@ -24,17 +28,22 @@ def sequence_points(sequence_name: str, sensor_id: int = SENSOR_ID) -> pd.DataFr
     df["timestamp"] = radar_data["timestamp"]
     df["track_id"] = radar_data["track_id"]
     df["label_id"] = radar_data["label_id"]
-    df = df[(df["track_id"] != b"") & (df["sensor_id"] == sensor_id)]
+    mask = df["track_id"] != b""
+    if sensor_id is not None:
+        mask &= df["sensor_id"] == sensor_id
+    df = df[mask]
     df["sequence_name"] = sequence_name
     df["label_name"] = df["label_id"].map(lambda label_id: LABELS[label_id][0])
     return df
 
 
-def build_points_table(sequence_names: list[str]) -> pd.DataFrame:
-    return pd.concat([sequence_points(name) for name in sequence_names], ignore_index=True)
+def build_points_table(sequence_names: list[str], sensor_id: int | None = SENSOR_ID) -> pd.DataFrame:
+    return pd.concat([sequence_points(name, sensor_id) for name in sequence_names], ignore_index=True)
 
 
-def build_and_save_points_table(sequence_names: list[str] | None = None, table_path=None) -> pd.DataFrame:
+def build_and_save_points_table(
+    sequence_names: list[str] | None = None, table_path=None, sensor_id: int | None = SENSOR_ID
+) -> pd.DataFrame:
     """Build the points table and save it as a parquet file. Returns the table.
 
     Skips rebuilding if table_path already exists AND covers exactly the requested
@@ -52,7 +61,7 @@ def build_and_save_points_table(sequence_names: list[str] | None = None, table_p
             return pd.read_parquet(table_path)
         print(f"{table_path} exists but covers different sequences than requested, rebuilding")
 
-    df = build_points_table(sequence_names)
+    df = build_points_table(sequence_names, sensor_id)
     n_instances = df.groupby(["sequence_name", "timestamp", "track_id"]).ngroups
     print(f"{len(df)} points across {n_instances} object instances, {len(sequence_names)} sequences")
 

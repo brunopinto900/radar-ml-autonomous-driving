@@ -49,6 +49,7 @@ WINDOW_N = 10
 STRIDE = 1
 
 POINTS_TABLE_SEQ_PATH = RESULTS_DIR / "data" / "points_table_seq.parquet"
+POINTS_TABLE_SEQ_ALLSENSORS_PATH = RESULTS_DIR / "data" / "points_table_seq_allsensors.parquet"
 TRACK_ACC_DIR = RESULTS_DIR / "track_accumulation"
 
 # "the accumulation baseline": N=5 (diminishing returns already set in by N=10, see
