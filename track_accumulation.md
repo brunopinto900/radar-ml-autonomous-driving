@@ -373,7 +373,161 @@ Same K=5 causal probability-smoothing technique as before, applied to the new be
 
 Flat to slightly negative, the opposite of N=10 (5/5 classes improved there). Likely explanation: at N=50 with stride 1, consecutive windows already share 49 of 50 scans, so the raw probability trajectory is already heavily autocorrelated before any explicit smoothing is applied, there's little flicker left for a moving average to remove. Stacking K=5 on top mostly just risks dragging a stale window's probability across a real class transition. Reads as smoothing being useful in proportion to how noisy the raw per-window signal is, not a free win regardless of N. Not worth keeping at N=50, best number stays the raw (unsmoothed) 0.881.
 
-## Consolidated results
+## DeepReflecs + GRU: per-scan embeddings, learned temporal aggregation
+
+Different mechanism than everything above: instead of pooling raw points across scans into one bigger point cloud, each scan keeps its own point set, gets reduced to one embedding vector by a frozen, already-trained DeepReflecs encoder (the N=1 control, `x_seq`/`y_seq`, per-scan recentered), and a GRU consumes the sequence of a track's embeddings. Precompute-then-train-RNN: the encoder runs once per scan across the whole dataset (cached), not once per window, so a stride=1 sliding window's N-1 scan overlap costs nothing extra in encoder compute. Unidirectional/causal by construction (a scan's verdict only depends on scans up to and including it), deliberately not mirroring the bidirectional LSTM in Hassan et al. 2024 (EuRAD, multi-frame RadarScenes classification), since a BiLSTM needs future scans and can't run in real-time streaming inference. No padding needed for short windows either, unlike the diff-vector attempt: the GRU just runs fewer steps for a young track (`pack_padded_sequence`).
+
+N=10, stride=1, sensor-2-only, GRU hidden_size=64, 1 layer, MLP head (1 hidden layer, matching `mlp_classifier.MLP`'s shape), same canonical split:
+
+| class | GRU N=10 (h=64) | histogram MLP N=10 + temporal variation | histogram MLP N=10 control |
+|---|---|---|---|
+| car | 0.918 | 0.917 | 0.909 |
+| large_vehicle | 0.775 | 0.778 | 0.755 |
+| two_wheeler | 0.842 | 0.824 | 0.803 |
+| pedestrian | 0.839 | 0.843 | 0.841 |
+| pedestrian_group | 0.862 | 0.861 | 0.846 |
+| macro F1 | 0.847 | 0.845 | 0.831 |
+
+Beats the plain control by +0.016, and edges out the best hand-engineered feature (temporal variation) by +0.002, a tie everywhere except `two_wheeler`, where the GRU is clearly ahead (+0.018 over temporal variation, +0.039 over control). `two_wheeler` is the one class this doc already flagged as having genuine aspect-angle/shape diversity to exploit, so that gap being real and not scattered is a meaningful signal, even though the headline macro F1 doesn't clear the existing best. Training curve caveat: train accuracy was still climbing at epoch 100 (0.894) while val accuracy plateaued/got noisy around 0.855 to 0.865 from roughly epoch 40 on, more consistent with a generalization/noise ceiling than starved capacity. Single split, not fold-validated.
+
+### Model size and automotive SoC memory
+
+19,941 params total (18,816 in the GRU, 1,125 in the MLP head), 80KB float32 or ~20KB int8-quantized. For scale, the frozen per-scan DeepReflecs encoder underneath it is only 1,317 params, so the GRU is already ~15x bigger than the thing feeding it. Per-step compute is roughly 3 x hidden_size x (hidden_size + input_dim) MACs, about 19k MACs per tracked object per scan at hidden_size=64, trivial next to what a radar SoC already runs every frame (FFTs, CFAR, beamforming), with or without a dedicated NN accelerator.
+
+The real deployment number isn't parameter count, it's memory for buffering raw points, and this architecture is cheaper there than every pooling variant in this doc, not more expensive. Sensor-2 N=50 pooling holds up to 50 scans' worth of raw points per tracked object; all-sensor N=50 holds up to 4x that. The GRU needs none of it: a scan's points get encoded and discarded immediately, and all that persists per tracked object between scans is the GRU's hidden state, a fixed hidden_size-length vector (256 bytes at hidden_size=64), regardless of how long the track has run. Going from N=10 to N=50 costs the pooling variants real memory per tracked object; it costs the GRU variant nothing, since there's no window to hold, just a running state. Tradeoff made for that: the encoder's embeddings are whatever the N=1 model already learned for single-scan classification, not fine-tuned for temporal usefulness (the precompute-then-train choice made when planning this).
+
+### Capacity ablation: hidden_size 64 vs 128
+
+Same N=10, stride=1, sensor-2-only precompute GRU, only hidden_size doubled (64 to 128, ~19.9k to ~64.4k params):
+
+| | GRU h=64 | GRU h=128 | best non-GRU (all-sensor N=50 + temporal variation) |
+|---|---|---|
+| macro F1 | 0.847 | 0.862 | 0.881 |
+
++0.015 from doubling hidden_size, a real, non-trivial gain (bigger than the earlier CONV_DIM/POINT_DIM capacity ablation's +0.007 on the pooled DeepReflecs model). Read against the training-curve caveat above (train still climbing, val flat/noisy at h=64): that pattern looked more like a generalization ceiling than starved capacity, but the ablation says capacity was still a real, if partial, factor. Still short of the best pooling-based result (0.881), by a smaller margin than h=64 was (0.019 vs 0.034 back). Single split, not fold-validated.
+
+### Causal transformer variant: same embeddings, self-attention instead of recurrence
+
+Same precomputed per-scan DeepReflecs embeddings and windowing as the GRU (N=10, stride=1, sensor-2-only), swapped the GRU for a small causal self-attention encoder (`DeepReflecsTransformer`): d_model=32 (matches the embedding dim, no input projection needed), 4 heads, 1 layer, feedforward dim 64, dropout 0. Needs two things a GRU gets for free: an explicit causal mask (attention has no inherent notion of order or direction) and a learned positional embedding per FIFO-buffer slot (0..9), added to the input embeddings before the first layer. The output at each sequence's own last real position (direct analog of the GRU's final hidden state h_t) feeds the same MLP head. Deliberately not sinusoidal positional encoding: sinusoidal's main advantage is generalizing to sequence lengths unseen in training, irrelevant here since every window is capped at N=10 by construction, and a learned table over only 10 positions costs a trivial 320 parameters.
+
+| config | params | macro F1 |
+|---|---|---|
+| GRU, h=64 | 19,941 | 0.847 |
+| Transformer, d=32 | 9,477 | 0.846 |
+
+Essentially tied with the GRU (-0.001), not a loss, using roughly half the parameters. Reading this as "attention doesn't help here" would be too strong a conclusion from one run: the GRU's own capacity ablation (previous section) found a real +0.015 from doubling hidden_size, so a same-scale untuned transformer landing at parity rather than below suggests it isn't obviously worse per parameter, not that it's hit some fundamental ceiling. A small capacity/learning-rate sweep would be needed before concluding anything stronger than "roughly matches the GRU out of the box." Single split, not fold-validated.
+
+Ran that capacity check: d_model doubled (32 to 64, dim_feedforward doubled alongside it to keep the usual 2x-d_model ratio, ~9.5k to ~37.3k params).
+
+| model | small | large | delta |
+|---|---|---|---|
+| GRU (h=64 → h=128) | 0.847 (19.9k params) | 0.862 (64.4k params) | +0.015 |
+| Transformer (d=32 → d=64) | 0.846 (9.5k params) | 0.848 (37.3k params) | +0.002 |
+
+Different result from the GRU's own ablation, and a more telling one: the GRU clearly wasn't capacity-saturated at h=64, more width bought something real. The transformer barely moved despite a comparable (if not larger) relative jump in parameters. Combined, this points toward the transformer's ~0.846-0.848 being closer to an actual ceiling for this architecture on this data at N=10, not a capacity bottleneck the earlier untuned run just hadn't reached yet. Single split, not fold-validated.
+
+### End-to-end variant: an OOM, and the per-batch collation fix
+
+Planned and built the end-to-end counterpart (encoder not frozen, gradients flow through it every window, see module docstring in `scripts/deepreflecs_rnn_track_accumulation.py`), two init strategies: warm-start (encoder from the N=1 checkpoint, GRU+head from the already-trained precompute GRU checkpoint, nothing random at step 0) and random-init (everything trained jointly from scratch).
+
+First implementation padded every window to one dense `(n_windows, max_seq_len, max_points_per_scan, n_features)` array per split, built once up front, the same convention `pad_to_fixed` already uses for the flat pooled representation elsewhere in this branch. On the full sensor-2-only N=10 dataset this OOM-killed the process (confirmed via `dmesg`: `oom-kill`, ~7.35GB resident on a 12GB machine, worse once a second concurrent run pushed it to 8.8GB before that one was stopped too). Root cause: points-per-scan is heavily skewed in this dataset (median 2, 99th percentile 13, single dataset-wide max 45), so forcing every one of N=10 scan-slots in every one of several hundred thousand windows to the global worst case (45) wastes roughly 45/2.9, about 15x, the memory a typical window actually needs. The flat pooled representation elsewhere in this branch doesn't have this problem since it only pads to the largest actual total points observed in any one window, not (worst-case per scan) x (scans per window).
+
+Fix: pad fresh per mini-batch instead of once for the whole split (`collate_scan_sequences`), using only that batch's own max points-per-scan rather than the dataset-wide one. Verified correct on a tiny subset first (small train_acc/val_acc numbers matched the pre-fix run closely, same code path otherwise), then confirmed on the full dataset: resident memory stayed under 3GB combined for both variants running concurrently, versus the 7 to 9GB that triggered the kill. Costs a small amount of repeated Python-level padding work per training step, negligible next to the per-step point-encoder forward/backward pass that step already does.
+
+Results, same N=10/stride=1/sensor-2-only config as the precompute GRU:
+
+| config | macro F1 |
+|---|---|
+| end-to-end, random-init | 0.839 |
+| GRU, h=64, precompute (frozen encoder) | 0.847 |
+| Transformer, d=32, precompute | 0.846 |
+| end-to-end, warmstart | 0.853 |
+| GRU, h=128, precompute | 0.862 |
+
+Clean ordering: warmstart beats frozen precompute, random-init loses to it. Letting an already-good encoder keep adapting to the temporal objective helps a little (+0.006 over the frozen version at the same hidden_size). Throwing away the single-scan pretraining entirely and learning everything jointly from scratch hurts, landing below even the simplest frozen-encoder baseline, worse than not fine-tuning the encoder at all. Reads as single-scan supervision carrying real, hard-to-recover value that a windowed multi-scan objective alone, with this much data, doesn't reconstruct from random weights. Still nothing in this whole GRU/Transformer/end-to-end line beats the pooled histogram MLP's best (0.881). Single split, not fold-validated.
+
+### Late fusion: pooled DeepReflecs + GRU hidden state, concatenated
+
+Direct test of whether the sequence branch (GRU over per-scan embeddings) knows anything the pooled branch (DeepReflecs on all N scans' points concatenated, order-blind) doesn't already have: both frozen, reused from already-trained checkpoints (pooled N=10 DeepReflecs, precompute GRU h=64), only a small new MLP head trained on their concatenated output (32-d pooled embedding + 64-d GRU hidden state = 96-d input). Same U-Net-style skip-connection reasoning as discussed: splice in a view that the other branch's own bottleneck would otherwise discard, rather than force the final decision through only one path.
+
+| config | macro F1 |
+|---|---|
+| pooled DeepReflecs, N=10, alone | 0.825 |
+| GRU, h=64, alone (frozen encoder) | 0.847 |
+| fusion (pooled + GRU h=64) | **0.853** |
+| end-to-end GRU, warmstart | 0.853 |
+
++0.006 over the GRU alone, real but modest, the same order of magnitude as most gains in this whole line. Notably, two completely different ways of extracting more signal, fine-tuning the encoder end-to-end versus bolting on an entirely separate pooled branch, land at almost the identical number (0.853 vs 0.8529). Reads as partial complementarity: the pooled branch carries a bit of information the GRU's own embedding sequence doesn't fully capture, but not enough to suggest the two views are seeing fundamentally different things. Still short of 0.881. Single split, not fold-validated.
+
+### Temporal variation scalar, added to the GRU's own head
+
+Same summed-diff scalar that helped the pooled histogram MLP (0.831 to 0.845 at N=10), now concatenated directly onto the GRU's final hidden state before the MLP head, instead of relying on the GRU to have learned that signal implicitly from the raw embedding sequence.
+
+| config | macro F1 |
+|---|---|
+| GRU, h=64, alone (frozen encoder) | 0.847 |
+| GRU, h=128, alone (frozen encoder) | 0.862 |
+| fusion (pooled DeepReflecs + GRU h=64) | 0.853 |
+| GRU, h=64, + temporal variation scalar | **0.860** |
+
++0.013 over the plain GRU h=64, bigger than the fusion gain (+0.006) and bigger than what the histogram MLP got from the same scalar at N=10 (+0.014, close call). Beats fusion despite using half the extra parameters (one scalar concatenated vs. a whole second 32-d embedding branch), and lands almost as high as doubling GRU capacity to h=128, for a fraction of the cost. Reads as evidence that the summed-diff signal isn't fully recoverable by the GRU from the embedding sequence alone, cheap explicit features still carry information a learned aggregator doesn't automatically reconstruct. Still short of 0.881. Single split, not fold-validated.
+
+**Pushed to N=50, sensor-2-only, same architecture (GRU h=64 + temporal variation scalar).** Every earlier GRU/Transformer/fusion result in this branch stayed at N=10; this is the first time the sequence-model line has been pushed to the same window size that produced the branch's overall best pooled result.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU+temporal, N=10, sensor-2-only | 0.929 | 0.807 | 0.845 | 0.845 | 0.873 | 0.860 |
+| GRU+temporal, N=50, sensor-2-only | 0.952 | 0.790 | 0.884 | 0.871 | 0.899 | **0.883** |
+| pooled MLP, all-sensor N=50 + temporal variation (prior overall best) | 0.940 | 0.814 | 0.853 | 0.905 | 0.894 | 0.881 |
+
+Beats the branch's prior overall best, and does it on sensor-2-only data, no cross-sensor handoff needed. This changes the earlier read: it isn't that architecture never beats scaling N/sensors, it's that the GRU/Transformer/fusion line simply hadn't been pushed past N=10 yet, one axis (window size) was never actually varied for the sequence models until now. `two_wheeler` and `pedestrian_group` both jump hard (+0.039, +0.026 vs GRU+temporal N=10), `large_vehicle` drops (-0.017), an uneven pattern similar to the cross-sensor handoff results, not a uniform scaling effect.
+
+Caveat, same as flagged above: no early stopping or best-checkpoint selection. This run's training curve is different in character from every other GRU/Transformer run so far, train accuracy is still climbing meaningfully in the last 20 epochs (0.9413 to 0.9456) while val accuracy oscillates in a tighter but still real band (0.887 to 0.894), a widening train/val gap that reads as the model starting to overfit rather than being fully converged. Unlike the orthogonalized-fusion caveat above, this one cuts the other way: the epoch-100 snapshot could still be missing a bit more real signal (undertrained relative to its own train curve) or could already be past its best val epoch (overfitting), and there's no way to tell which without checkpoint selection. This result has not been fold-validated, and given it's now the new best in the branch, it's the more urgent fold-validation candidate, alongside the pooled 0.881 already queued.
+
+Same scalar, added to the Transformer's final hidden state instead:
+
+| config | macro F1 |
+|---|---|
+| Transformer, d=32, alone (frozen encoder) | 0.846 |
+| Transformer, d=32, + temporal variation scalar | 0.845 |
+| GRU, h=64, + temporal variation scalar | 0.860 |
+
+Flat, effectively zero change, within noise of the Transformer alone. Sharp contrast with the GRU's own +0.013 from the identical scalar on the identical embeddings. Consistent with the capacity ablation asymmetry already seen (GRU +0.015 from doubled width, Transformer +0.002): the Transformer's attention pooling over the embedding sequence already seems to be extracting close to what it's going to extract from this data at N=10, so bolting on an extra scalar doesn't move it, while the GRU's more constrained recurrent summary still had room for an explicit feature to add something it wasn't inferring on its own. Single split, not fold-validated.
+
+### Design note: why a three-way fusion (pooled skip + temporal scalar) likely won't stack cleanly
+
+Not run, reasoning only. The pooled DeepReflecs skip connection (fusion, +0.006 over GRU alone) and the temporal variation scalar (+0.013 over GRU alone) are both patches for the same underlying weakness, the frozen N=1 embedding sequence not fully capturing something the GRU needs. They are not obviously independent sources of information, so naively concatenating both onto the GRU head is unlikely to give a stacked gain anywhere near +0.019.
+
+Domain reason they overlap: the pooled DeepReflecs branch is an order-blind aggregate shape over all N scans' points. An object that changes a lot scan to scan, exactly what the temporal variation scalar measures directly, will also show up as more spread in that pooled aggregate. The scalar isn't really an independent feature, it's a compressed, explicit version of a variance signal the pooled embedding already carries implicitly and diffusely.
+
+Two ways to check this properly, in increasing order of rigor, before trusting any three-way fusion number:
+
+1. Cheap diagnostic: fit a linear probe predicting the temporal variation scalar from the pooled DeepReflecs embedding (linear regression, R² on held-out data). High R² confirms the two are carrying mostly the same signal, and shows which one is more compressed (the scalar) versus more expensive (the 32-d embedding) for that same information.
+2. If overlap is confirmed and both are still wanted, orthogonalize instead of concatenating raw: regress the temporal-predictable component out of the pooled embedding and feed the GRU head only the residual. Any gain measured afterward is then guaranteed non-redundant, rather than hoping a small MLP head disentangles the overlap on its own from limited data.
+
+If the mechanism above is right, the actually clean fix isn't fusion math at all: restrict the pooled branch to central-tendency stats (means) and let the temporal scalar own dispersion, so each branch has a distinct job instead of both branches smearing across the same axis.
+
+**Diagnostic result.** Linear regression predicting the two temporal variation scalars from the pooled DeepReflecs embedding (32-d), fit on train, evaluated on test:
+
+| temporal scalar | R² train | R² test |
+|---|---|---|
+| rcs (summed diff) | 0.402 | 0.387 |
+| vr_compensated (summed diff) | 0.356 | 0.334 |
+
+Real overlap (roughly a third to 40% of variance recoverable), but partial, not near total: 60 to 65% of each scalar's variance is not linearly recoverable from the pooled embedding, so the two are neither independent nor redundant, somewhere in between. This is high enough to make a raw three-way concatenation (pooled + GRU hidden + temporal) unlikely to add the full +0.019 the two individual gains would suggest, but not so high that the temporal scalars are pure restatement of the pooled embedding either.
+
+**Orthogonalized three-way fusion result.** Built the fix described above: regressed the pooled embedding on the temporal scalars (fit on train), kept only the residual, concatenated `[pooled residual (32) ; GRU hidden (64) ; temporal (2)]` into one 98-dim input for a fresh MLP head.
+
+| config | macro F1 |
+|---|---|
+| GRU, h=64, alone (frozen encoder) | 0.847 |
+| fusion (pooled + GRU h=64) | 0.853 |
+| GRU, h=64, + temporal variation scalar | 0.860 |
+| orthogonalized fusion (pooled residual + GRU + temporal) | 0.8544 |
+
+Worse than GRU+temporal alone, not just short of an additive +0.019. The orthogonalization did its job (removing the ~35% shared variance so the pooled branch can no longer restate the temporal scalar), but what's left in the residual isn't itself useful for classification, it reads as mostly noise once the shared part is gone. So the earlier fusion gain (0.853, pooled+GRU without temporal) was likely riding on exactly the variance that overlaps with temporal variation, not on some separate signal the pooled branch uniquely holds. Once that shared part is made explicit and available directly (via the temporal scalar), the pooled branch has nothing left to add, and the extra 32-dim input just gives the small MLP head more to overfit against the same amount of data. Confirms the design note's mechanism, and answers the open question from it: no, three-way fusion isn't worth it, in either the naive or the orthogonalized form. Single split, not fold-validated.
+
+**Caveat on all of these single-split GRU/Transformer/fusion numbers.** None of the trainers in this line (GRU, Transformer, fusion, either temporal-variation variant, the orthogonalized fusion above) do early stopping or best-checkpoint selection. Every one saves whatever the model looks like at epoch 100, whatever that happens to be. Checked directly on this orthogonalized fusion run and the plain GRU+temporal run: train accuracy is flat by epoch 100 in both, but val accuracy is still oscillating by about a full point (0.86 to 0.87) even after training accuracy has stopped moving. The 0.0056 gap between orthogonalized fusion (0.8544) and GRU+temporal (0.860) is smaller than that oscillation band, so it's fair to say fusion added nothing, not fair to read the two numbers as precisely ranked. Same caveat applies to every close call in this table (GRU h=64 vs Transformer d=32, fusion vs end-to-end warmstart, etc.), differences under roughly a point should be read as ties, not as ordered results, unless checked against the training curve first.
 
 DeepReflecs (point-set) family, single canonical split:
 
@@ -406,6 +560,17 @@ Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless 
 | N=20 + temporal variation, all-sensor (delta_t corrected) | 0.933 | 0.794 | 0.841 | 0.894 | 0.869 | 0.866 |
 | N=50 + temporal variation, all-sensor (delta_t corrected) | 0.940 | 0.814 | 0.853 | 0.905 | 0.894 | **0.881** |
 | N=50 + temporal variation, all-sensor + post-hoc smoothing (K=5) | 0.940 | 0.813 | 0.851 | 0.902 | 0.893 | 0.880 |
+| N=10, DeepReflecs+GRU (h=64), sensor-2-only | 0.918 | 0.775 | 0.842 | 0.839 | 0.862 | 0.847 |
+| N=10, DeepReflecs+GRU (h=128), sensor-2-only | 0.930 | 0.813 | 0.845 | 0.848 | 0.874 | 0.862 |
+| N=10, DeepReflecs+causal Transformer (d=32), sensor-2-only | 0.917 | 0.785 | 0.826 | 0.839 | 0.861 | 0.846 |
+| N=10, DeepReflecs+causal Transformer (d=64), sensor-2-only | 0.914 | 0.771 | 0.834 | 0.847 | 0.872 | 0.848 |
+| N=10, DeepReflecs+GRU end-to-end, warmstart, sensor-2-only | 0.923 | 0.786 | 0.847 | 0.839 | 0.870 | 0.853 |
+| N=10, DeepReflecs+GRU end-to-end, random-init, sensor-2-only | 0.913 | 0.773 | 0.823 | 0.835 | 0.850 | 0.839 |
+| N=10, fusion (pooled DeepReflecs + GRU h=64), sensor-2-only | 0.923 | 0.787 | 0.847 | 0.840 | 0.868 | 0.853 |
+| N=10, DeepReflecs+GRU (h=64) + temporal variation scalar, sensor-2-only | 0.929 | 0.807 | 0.845 | 0.845 | 0.873 | 0.860 |
+| N=10, DeepReflecs+causal Transformer (d=32) + temporal variation scalar, sensor-2-only | 0.914 | 0.782 | 0.818 | 0.844 | 0.867 | 0.845 |
+| N=10, orthogonalized fusion (pooled residual + GRU h=64 + temporal variation), sensor-2-only | 0.923 | 0.785 | 0.850 | 0.842 | 0.872 | 0.854 |
+| N=50, DeepReflecs+GRU (h=64) + temporal variation scalar, sensor-2-only | 0.952 | 0.790 | 0.884 | 0.871 | 0.899 | **0.883** |
 
 6-fold validated (val split, mean across folds, different rotating splits, not the canonical one above):
 
@@ -416,3 +581,65 @@ Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless 
 | single-scan baseline, 6-fold (reference, pre-branch) | — | — | — | — | — | 0.735 | 0.025 |
 
 Best single-split number in the branch is all-sensor N=50 + temporal variation at 0.881 (raw, unsmoothed), stacking both real levers found this session: more real time per track (large N) and more real detections per track (cross-sensor handoff). Post-hoc smoothing helps at N=10 (+0.005) but not at N=50 (-0.001), likely because heavily overlapping N=50 windows are already autocorrelated before any smoothing. Nothing here is fold-validated. Everything from the shape/sign attempts onward is from one session's worth of exploration on the same canonical split. Next step: fold-validate this configuration before treating 0.881 as an established number rather than a single-split result.
+
+## TLDR-Comparison
+
+Every variant tried in this branch, one row each, sorted by macro F1 descending. Smoothing variants excluded (post-hoc, not a distinct architecture/feature). "What was done" is the method itself, "Motivation" is why it was tried, "Result" is the outcome. Single-split numbers unless a fold mean/std is noted.
+
+### Results (macro F1 known)
+
+| Variant | What was done | N | Model | Sensor | Macro F1 | Motivation | Result |
+|---|---|---|---|---|---|---|---|
+| GRU h=64 + temporal variation | Concatenated the two temporal-variation scalars onto the GRU's final hidden state, pushed to N=50 instead of N=10 | 50 | DeepReflecs | sensor2 | **0.883** | Line had never been pushed past N=10, test if it scales with window size like the pooled MLP did | New overall best; uneven per-class (two_wheeler/pedestrian_group up hard, large_vehicle down); train/val gap still widening at epoch 100, not fully converged |
+| Pooled + temporal variation, delta_t corrected | Histogram MLP trained on all-4-sensor windowed point sets (N=50) plus elapsed-time-normalized temporal variation scalars | 50 | MLP | all-sensor | 0.881 | Combine both known levers (bigger N, cross-sensor handoff) in one run | Axes stack rather than cancel, clears both individual bests; was overall best until GRU N=50 above |
+| Pooled + temporal variation, uncorrected gap-norm | Same all-sensor histogram MLP pipeline at N=20, temporal variation normalized by gap count, not yet elapsed time | 20 | MLP | all-sensor | 0.871 | Push cross-sensor handoff to a bigger window | Was best at the time; later found to overstate the gain (see corrected row) |
+| Pooled + temporal variation | Histogram MLP on sensor-2-only N=50 windows plus temporal variation scalars | 50 | MLP | sensor2 | 0.867 | Same feature at the largest single-sensor window tried | New best for sensor2-only line; feature's own delta not monotonic across N, reads as noise not trend |
+| Pooled + temporal variation, delta_t corrected | Re-ran N=20 all-sensor with temporal variation renormalized by real elapsed time instead of gap count | 20 | MLP | all-sensor | 0.866 | Uncorrected gap-normalization assumed uniform gap duration, false once sensor handoffs mix short/long gaps | Small real correction, all classes down a little; erases the earlier win over sensor2 N=50, now roughly tied |
+| GRU h=128 | Doubled the GRU's hidden_size from 64 to 128, otherwise identical config | 10 | DeepReflecs | sensor2 | 0.862 | Check if h=64 GRU was capacity-limited | Real, non-trivial +0.015; GRU not capacity-saturated at h=64 |
+| GRU h=64 + temporal variation | Concatenated the two temporal-variation scalars onto the GRU's h=64 hidden state before the MLP head | 10 | DeepReflecs | sensor2 | 0.860 | Add the cheap temporal scalar directly, bypass the frozen encoder's bottleneck | Biggest single gain in this line at N=10 (+0.013), bigger than fusion, far fewer added params |
+| Pooled + temporal variation | Histogram MLP, N=20, temporal variation scalars added | 20 | MLP | sensor2 | 0.859 | Check if temporal feature's contribution holds at bigger window | Real but roughly half the marginal gain of N=10, bigger window starts implicitly carrying what the feature added |
+| Pooled control | Histogram MLP, N=50, no extra features | 50 | MLP | sensor2 | 0.858 | Push N further on one sensor | Small further gain over N=20, diminishing but not flat |
+| Pooled + temporal variation, uncorrected gap-norm | Switched df to the all-sensor points table (sensor_id=None), otherwise same N=10+temporal histogram MLP pipeline | 10 | MLP | all-sensor | 0.854 | Test cross-sensor handoff vs. more time on one sensor | Real gain over sensor2 N=10+temporal; pedestrian jumped hard, large_vehicle dropped slightly; carries the uncorrected gap-norm bias, never re-run with the fix |
+| Orthogonalized fusion (pooled residual + GRU + temporal) | Regressed the pooled embedding on the temporal scalars (fit on train), kept only the residual, concatenated with GRU hidden state and temporal scalars into one MLP head | 10 | DeepReflecs | sensor2 | 0.854 | Probe found ~35% shared variance between pooled embedding and temporal scalar; test if removing overlap recovers a cleaner additive gain | Worse than GRU+temporal alone; residual carries no independent signal, closes the three-way fusion question |
+| End-to-end GRU, warmstart | Unfroze the DeepReflecs encoder, backpropagated through it every window, initialized from the separately-trained N=1 encoder + precompute GRU checkpoints | 10 | DeepReflecs | sensor2 | 0.853 | Let the frozen encoder keep adapting to the temporal objective | Real +0.006 over frozen GRU |
+| Fusion (pooled + GRU h=64) | Concatenated the pooled (order-blind, all-N-scans) DeepReflecs embedding with the GRU's final hidden state, trained a new small MLP head, both branches frozen | 10 | DeepReflecs | sensor2 | 0.853 | Test if the order-blind pooled branch knows anything the GRU sequence branch doesn't | Real but modest +0.006, lands almost identical to end-to-end warmstart via a totally different mechanism |
+| Pooled control | Histogram MLP, N=20, no extra features | 20 | MLP | sensor2 | 0.852 | Base accumulation hadn't saturated at N=10 like the DeepReflecs curve suggested | Real +0.021 over N=10 |
+| Transformer d=64 | Doubled d_model from 32 to 64 (and dim_feedforward alongside it), otherwise identical Transformer config | 10 | DeepReflecs | sensor2 | 0.848 | Check if the Transformer was capacity-limited like the GRU turned out to be | Barely moved (+0.002) despite comparable relative param jump; reads as a real architectural ceiling |
+| GRU h=64 | Ran a frozen per-scan DeepReflecs encoder over each scan, fed the embedding sequence into a causal unidirectional GRU (packed variable-length sequences), MLP head on the final hidden state | 10 | DeepReflecs | sensor2 | 0.847 | Test per-scan embeddings + learned temporal aggregation instead of pooling raw points, causal for real-time deployment | Beats histogram control (+0.016), edges out best hand-engineered feature (+0.002); two_wheeler clearly ahead |
+| Transformer d=32 | Same precomputed embeddings/windowing as the GRU, swapped GRU for a causal self-attention encoder with a learned positional embedding table | 10 | DeepReflecs | sensor2 | 0.846 | Self-attention over the same embeddings instead of recurrence | Essentially tied with GRU h=64 (-0.001) at about half the params |
+| Pooled + temporal variation | Histogram MLP, N=10, added the two temporal-variation scalars (median-based summed absolute diff per gap) | 10 | MLP | sensor2 | 0.845 | Retry temporal-variation feature at a longer window (more gaps to average) | Real signal (+0.014, 4-5x the N=5 move), concentrated in large_vehicle/two_wheeler/pedestrian_group |
+| Transformer d=32 + temporal variation | Concatenated the temporal-variation scalars onto the Transformer's final-position output before the MLP head | 10 | DeepReflecs | sensor2 | 0.845 | Same scalar addition as the GRU version, on the Transformer | Flat (-0.001), sharp contrast with GRU's +0.013; consistent with Transformer already near its capacity ceiling |
+| Pooled + transition matrix | Replaced the temporal-variation scalar with a 4x4 bin-to-bin transition count per feature | 10 | MLP | sensor2 | 0.839 | Test if preserving bin-to-bin transition shape beats magnitude-only diff | Worse than magnitude-only (-0.006) |
+| End-to-end GRU, random-init | Same end-to-end setup as warmstart, but every weight (encoder, GRU, head) initialized randomly | 10 | DeepReflecs | sensor2 | 0.839 | Isolate how much of warmstart's gain depends on single-scan pretraining vs. the end-to-end objective itself | Worse than even frozen baseline; single-scan pretraining carries value a windowed objective alone doesn't reconstruct from random weights |
+| Pooled + signed diff vector | Replaced the summed-absolute-diff scalar with one signed column per gap, right-aligned and zero-padded for shorter windows | 10 | MLP | sensor2 | 0.836 | Test if keeping sign (not just magnitude) of scan-to-scan diff helps | Worse than magnitude-only (-0.009) |
+| Pooled + diff vector + window length | Added one extra column (real scan count) to the signed diff vector | 10 | MLP | sensor2 | 0.834 | Let the model tell padded columns from real ones | No improvement (-0.002), one scalar among 99 columns wasn't enough signal |
+| Pooled control | Histogram MLP, N=10, no extra features | 10 | MLP | sensor2 | 0.831 | Push N past 5 for the cheaper histogram MLP now that it ties DeepReflecs | Real +0.016 over N=5, MLP hadn't saturated at N=5 |
+| Pooled control | DeepReflecs point-set encoder run directly on N=10 pooled points (all scans' points concatenated, order-blind max-pool) | 10 | DeepReflecs | sensor2 | 0.825 | Continue the point-set N sweep past 5 | Real +0.013 over N=5 raw; this is where the point-set line's own N sweep stopped |
+| Pooled + temporal variation | Same temporal-variation scalar as N=10, first tried at N=5 | 5 | MLP | sensor2 | 0.818 | First test of scan-to-scan magnitude of change at N=5 | Flat (+0.003), inside noise band, signal too weak to detect at this N |
+| Pooled control (clean 5-feature) | Quantile-bin histogram encoding (5 features, no doppler_spread) plus MLP, on the same N=5 windowed point sets DeepReflecs uses | 5 | MLP | sensor2 | 0.815 | Test if accumulation helps via denoised aggregate summary, not point-set-specific pattern | Ties DeepReflecs at N=5 (within 0.004), favors "denoising" over architecture-specific learning |
+| Pooled control, raw range_sc | Left each pooled point's own range_sc untouched instead of broadcasting the target scan's value | 5 | DeepReflecs | sensor2 | 0.812 | Check if broadcasting vs. leaving each point's own range matters | Statistically indistinguishable from broadcast (+0.001), raw kept as simpler |
+| Pooled control, broadcast range_sc | Pooled 5 scans' points per track into one DeepReflecs classification, target scan's range_sc broadcast to every point | 5 | DeepReflecs | sensor2 | 0.811 | First real accumulation test | Large real gain over N=1 (+0.059) |
+| Accumulation baseline, 6-fold, doubled capacity | Doubled CONV_DIM/POINT_DIM (16/32 to 32/64) on the N=5 accumulation baseline, same 6 folds | 5 | DeepReflecs | sensor2 | 0.807 (std 0.022) | Check if the N=5 baseline is under-capacity for pooled input | 6/6 folds improve (+0.007 mean), real but minor, not the main lever |
+| Accumulation baseline, 6-fold | Re-trained the N=5 raw accumulation baseline across the same 6 sequence-grouped val carves used for the single-scan model | 5 | DeepReflecs | sensor2 | 0.800 (std 0.023) | Confirm the N=5 accumulation gain survives split variance | 6/6 folds beat single-scan 6-fold baseline, ranges barely overlap, real effect |
+| N=1 control (x_seq/y_seq) | Single-scan DeepReflecs, recentered points using the global (x_seq/y_seq) frame instead of the car frame | 1 | DeepReflecs | sensor2 | 0.752 | Re-baseline under the frame needed once scans get pooled | Neutral vs. pre-branch (+0.003), frame change isn't confounding the N sweep |
+| Single-scan baseline (pre-branch) | Original single-scan DeepReflecs classifier, car-frame (x_cc/y_cc) recentering | 1 | DeepReflecs | sensor2 | 0.749 | Original reference point before any accumulation | Superseded once accumulation began |
+| Single-scan baseline, 6-fold | Same pre-branch single-scan model, evaluated across 6 sequence-grouped val carves instead of one split | 1 | DeepReflecs | sensor2 | 0.735 (std 0.025) | Establish the fold-to-fold noise floor before crediting any later gain as real | Sets the reference band (0.706-0.779) later gains had to clear |
+
+### Not yet run (gaps)
+
+| Variant | N | Model | Sensor | Motivation |
+|---|---|---|---|---|
+| Pooled + temporal variation, delta_t corrected | 10 | MLP | all-sensor | Fix was applied at N=20/50 but never re-run at N=10 |
+| Pooled control (no temporal) | 10, 20, 50 | MLP | all-sensor | Isolate handoff alone vs. handoff + temporal feature, every all-sensor run bundles both |
+| DeepReflecs point-set pooling | 20, 50 | DeepReflecs | sensor2 | Would show if point-set N-scaling matches the MLP's; MLP took over for pushing N instead |
+| GRU h=64 | 20 | DeepReflecs | sensor2 | Fill the gap between N=10 and N=50 GRU results |
+| GRU h=64 (no temporal) | 50 | DeepReflecs | sensor2 | Isolate how much of the 0.883 is N=50 alone vs. N=50+temporal |
+| GRU h=128 | 50 | DeepReflecs | sensor2 | Check if the h=64→h=128 capacity gain still holds at N=50 |
+| Transformer d=32 (plain) | 20, 50 | DeepReflecs | sensor2 | Check if the Transformer's apparent ceiling at N=10 is a window-size artifact |
+| Transformer d=32 + temporal variation | 50 | DeepReflecs | sensor2 | Direct Transformer counterpart to the GRU N=50 jump |
+| Fusion (pooled + GRU) | 20, 50 | DeepReflecs | sensor2 | Check if fusion's gain persists once GRU itself is stronger at larger N |
+| Orthogonalized fusion | 50 | DeepReflecs | sensor2 | Direct counterpart to the N=10 orthogonalized fusion, at the new best N |
+| End-to-end GRU (warmstart/random) | 20, 50 | DeepReflecs | sensor2 | Check if end-to-end's edge over frozen GRU holds at larger N, also needs the collation fix's memory profile re-checked |
+| GRU h=64 | 10 | DeepReflecs | all-sensor | Sequence-model line never combined with cross-sensor handoff, the MLP's second-biggest lever |
+| Transformer d=32 | 10 | DeepReflecs | all-sensor | Same, for the Transformer |
+| Fusion (pooled + GRU) | 10 | DeepReflecs | all-sensor | Same, for fusion (would need an all-sensor pooled DeepReflecs encoder too) |

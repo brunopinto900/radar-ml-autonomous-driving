@@ -362,6 +362,7 @@ def run_windowed_mlp(
     splits: dict[str, list[str]] | None = None,
     output_dir=None,
     run_tag: str = "",
+    eval_split: str = "test",
 ):
     """Single train/test run (no fold sweep, matching the one fixed canonical split
     the comparable DeepReflecs N=5/raw run used) of quantile_bins_5features' own
@@ -387,7 +388,11 @@ def run_windowed_mlp(
     2 only vs all sensors) built df, so two runs that differ only in that would
     silently share a directory and overwrite each other's model/metrics/plot (hit
     this directly: an all-sensor run clobbered a sensor-2-only run's saved files
-    before this tag existed)."""
+    before this tag existed). eval_split selects which built set (val or test) the
+    saved metrics/confusion matrix are computed on; defaults to "test" (unchanged
+    behavior for every existing single-split call). Fold validation passes "val"
+    instead, so 6 folds' worth of checks don't touch test at all, same touch-test-
+    once discipline as deepreflecs_track_accumulation.run_windowed_split_sensitivity."""
     if output_dir is None:
         suffix = "" if include_doppler_spread else "_nodopplerspread"
         suffix += "_temporalvar" if include_temporal_variation else ""
@@ -454,29 +459,110 @@ def run_windowed_mlp(
 
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
+    X_eval, y_eval = (X_test, y_test) if eval_split == "test" else (X_val, y_val)
+
     model.eval()
     with torch.no_grad():
-        y_pred = model(torch.tensor(X_test, device=DEVICE)).argmax(dim=1).cpu().numpy()
+        y_pred = model(torch.tensor(X_eval, device=DEVICE)).argmax(dim=1).cpu().numpy()
     precision, recall, f1, support = precision_recall_fscore_support(
-        y_test, y_pred, labels=range(len(classes)), zero_division=0
+        y_eval, y_pred, labels=range(len(classes)), zero_division=0
     )
     metrics_df = pd.DataFrame(
         {"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes
     )
-    metrics_df.to_json(output_dir / "mlp_test_metrics.json", orient="index", indent=2)
-    print(f"per-class precision/recall/f1 (test, windowed MLP N={n}, range_sc_mode={range_sc_mode}):")
+    metrics_df.to_json(output_dir / f"mlp_{eval_split}_metrics.json", orient="index", indent=2)
+    print(f"per-class precision/recall/f1 ({eval_split}, windowed MLP N={n}, range_sc_mode={range_sc_mode}):")
     print(metrics_df.round(3).to_string())
     print(f"macro F1: {metrics_df['f1'].mean():.4f}")
 
     import matplotlib.pyplot as plt
 
-    cm = confusion_matrix(y_test, y_pred, labels=range(len(classes)), normalize="true")
+    cm = confusion_matrix(y_eval, y_pred, labels=range(len(classes)), normalize="true")
     fig, ax = plt.subplots(figsize=(7, 6))
     ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
-    ax.set_title(f"windowed MLP (N={n}): test confusion matrix (row-normalized)")
+    ax.set_title(f"windowed MLP (N={n}): {eval_split} confusion matrix (row-normalized)")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     fig.tight_layout()
-    fig.savefig(output_dir / "mlp_test_confusion_matrix.png", dpi=150)
-    print(f"Saved {output_dir / 'mlp_test_confusion_matrix.png'}")
+    fig.savefig(output_dir / f"mlp_{eval_split}_confusion_matrix.png", dpi=150)
+    print(f"Saved {output_dir / f'mlp_{eval_split}_confusion_matrix.png'}")
 
     return model, history, metrics_df
+
+
+def run_windowed_mlp_split_sensitivity(
+    df: pd.DataFrame,
+    n: int = ACCUMULATION_BASELINE_N,
+    stride: int = STRIDE,
+    range_sc_mode: str = "raw",
+    classes: list[str] = MLP_CLASSES,
+    features: list[str] = FEATURES,
+    n_bins: int = N_BINS,
+    epochs: int = EPOCHS,
+    include_doppler_spread: bool = True,
+    include_temporal_variation: bool = False,
+    temporal_features: list[str] = TEMPORAL_FEATURES,
+    n_seeds: int = 10,
+    base_random_state: int = 0,
+    output_dir=None,
+    run_tag: str = "",
+) -> pd.DataFrame:
+    """Fold-validates a windowed MLP config across 6 sequence-grouped val carves, same
+    select_best_split machinery as deepreflecs_track_accumulation.run_windowed_
+    split_sensitivity. Built specifically to check this branch's best single-split
+    result (all-sensor N=50 + temporal variation, macro F1 0.881), which had never
+    been checked against split variance despite being the headline number of the
+    whole branch.
+
+    Evaluates on val, not test (run_windowed_mlp's eval_split="val"): 0.881 was
+    already measured on test once, re-touching it 6 more times here would burn the
+    one canonical test check this branch has been protecting throughout. Note the 6
+    folds here are generated from whichever df is passed in (e.g. the all-sensor
+    points table), so they are not guaranteed identical to the 6 folds the sensor-2-
+    only accumulation baseline used elsewhere in this branch: select_best_split's
+    fold assignment depends on the per-instance label distribution of df, and the
+    all-sensor table has more instances per track (cross-sensor handoffs add
+    timestamps) than the sensor-2-only table, which can shift StratifiedGroupKFold's
+    greedy balancing even at the same random_state. Internally consistent (same 6
+    folds across every fold in this one run), just not cross-comparable fold-by-fold
+    to the sensor-2-only baseline's fold table, only comparable in aggregate (mean/std)."""
+    from sequence_split import select_best_split
+
+    if output_dir is None:
+        suffix = "" if include_doppler_spread else "_nodopplerspread"
+        suffix += "_temporalvar" if include_temporal_variation else ""
+        suffix += f"_{run_tag}" if run_tag else ""
+        output_dir = TRACK_ACC_MLP_DIR / f"N{n}_stride{stride}_range{range_sc_mode}_quantile{suffix}_6fold"
+
+    candidates = select_best_split(
+        df, classes=classes, features=features, n_seeds=n_seeds, base_random_state=base_random_state
+    ).drop_duplicates("fold").sort_values("fold")
+
+    rows = []
+    for _, row in candidates.iterrows():
+        fold = row["fold"]
+        splits = {"train": row["train_sequences"], "val": row["val_sequences"], "test": row["test_sequences"]}
+        fold_dir = output_dir / f"fold_{fold}"
+        print(
+            f"=== windowed MLP 6-fold (N={n}, range_sc_mode={range_sc_mode}, "
+            f"temporal_variation={include_temporal_variation}) fold {fold} (max_ks={row['max_ks']:.4f}) ==="
+        )
+        _, _, metrics_df = run_windowed_mlp(
+            df, n=n, stride=stride, range_sc_mode=range_sc_mode, classes=classes, features=features,
+            n_bins=n_bins, epochs=epochs, include_doppler_spread=include_doppler_spread,
+            include_temporal_variation=include_temporal_variation, temporal_features=temporal_features,
+            splits=splits, output_dir=fold_dir, eval_split="val",
+        )
+        macro_f1 = metrics_df["f1"].mean()
+        print(f"fold {fold} macro F1: {macro_f1:.4f}")
+        rows.append({"fold": fold, "max_ks": row["max_ks"], "macro_f1": macro_f1})
+
+    summary = pd.DataFrame(rows)
+    print()
+    print(f"macro F1 range: {summary['macro_f1'].min():.3f} - {summary['macro_f1'].max():.3f}, std: {summary['macro_f1'].std():.3f}")
+    print(summary.to_string(index=False))
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = output_dir / "split_sensitivity_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    print(f"Saved {summary_path}")
+    return summary
