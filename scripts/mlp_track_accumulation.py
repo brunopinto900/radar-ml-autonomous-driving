@@ -41,26 +41,35 @@ def build_windowed_temporal_features(
     temporal_features: list[str] = TEMPORAL_FEATURES,
     n: int = ACCUMULATION_BASELINE_N,
     stride: int = STRIDE,
+    normalize: str = "elapsed_time",
 ) -> np.ndarray:
     """One row per window, one column per feature in temporal_features: mean absolute
     consecutive diff across that window's own per-scan medians (median of that scan's
     own points, not the raw pooled points, see track_accumulation.md's capacity
-    ablation follow-up discussion), divided by total elapsed real time spanned by the
-    window (last scan's timestamp minus first, in seconds; 0 for a single-scan window,
-    where there's no diff to take).
+    ablation follow-up discussion), normalized per `normalize`.
 
-    Normalizing by elapsed time rather than by number of gaps matters once a window
-    can mix gaps of different real duration, which happens for the all-sensor
-    (cross-sensor handoff) points table: two sensors briefly overlapping produce a
-    short gap, sensor-2-alone stretches produce a long one, and "1 gap" doesn't mean
-    the same amount of real motion in each case. For a single-sensor points table
-    gaps are uniform (~0.074s for sensor 2), so this is just a constant rescaling
-    there and doesn't change any sensor-2-only ranking (see track_accumulation.md).
+    normalize:
+    - "elapsed_time" (default): divide by total elapsed real time spanned by the
+      window (last scan's timestamp minus first, in seconds; 0 for a single-scan
+      window, where there's no diff to take). Matters once a window can mix gaps of
+      different real duration, which happens for the all-sensor (cross-sensor
+      handoff) points table: two sensors briefly overlapping produce a short gap,
+      sensor-2-alone stretches produce a long one, and "1 gap" doesn't mean the same
+      amount of real motion in each case.
+    - "gap_count": divide by number of gaps in the window (scans - 1) instead, the
+      original normalization, kept only to reproduce that comparison; for a single-
+      sensor points table gaps are uniform (~0.074s for sensor 2), so this is just a
+      constant rescaling of "elapsed_time" there and doesn't change any sensor-2-only
+      ranking, but silently assumes uniform gap duration once sensors mix (see
+      track_accumulation.md).
 
     Mirrors build_windowed_point_sets' own filtering/sorting/window-slicing exactly
     (same classes mask, same TRACK_COLS + timestamp sort, same stride slicing) so row
     i here lines up with point_sets[i]/labels[i] from build_windowed_point_sets(df,
     classes, ..., n, stride, ...) called on this same df."""
+    if normalize not in ("elapsed_time", "gap_count"):
+        raise ValueError(f"normalize must be 'elapsed_time' or 'gap_count', got {normalize!r}")
+
     mask = df["group"].isin(classes)
     filtered = df.loc[mask]
     feat_matrix = filtered[temporal_features].to_numpy(dtype="float64")
@@ -81,8 +90,12 @@ def build_windowed_temporal_features(
             window_idx = ordered[max(0, i - n + 1) : i + 1]
             medians = scan_medians[window_idx]
             if len(window_idx) > 1:
-                elapsed_s = (scan_timestamps[window_idx[-1]] - scan_timestamps[window_idx[0]]) / 1e6
-                variation = np.abs(np.diff(medians, axis=0)).sum(axis=0) / elapsed_s
+                abs_diff_sum = np.abs(np.diff(medians, axis=0)).sum(axis=0)
+                if normalize == "elapsed_time":
+                    denom = (scan_timestamps[window_idx[-1]] - scan_timestamps[window_idx[0]]) / 1e6
+                else:
+                    denom = len(window_idx) - 1
+                variation = abs_diff_sum / denom
             else:
                 variation = np.zeros(len(temporal_features))
             rows.append(variation)

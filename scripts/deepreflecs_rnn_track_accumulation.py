@@ -2046,15 +2046,20 @@ def _build_windowed_labels(
 def compute_temporal_variation_for_split(
     df: pd.DataFrame, split_sequences: list[str], y_reference: np.ndarray, classes: list[str] = MLP_CLASSES,
     temporal_features: list[str] = TEMPORAL_FEATURES, n: int = WINDOW_N, stride: int = STRIDE,
+    normalize: str = "elapsed_time",
 ) -> np.ndarray:
     """build_windowed_temporal_features for one split, verified aligned against
     y_reference (that split's labels from the GRU/transformer embedding-sequence
     branch) before trusting the two can be concatenated positionally: both are
     documented/established to iterate the same underlying scan universe in the same
     order, but this is exactly the kind of silent-misalignment risk worth checking
-    rather than assuming (see the fusion variant's same discipline above)."""
+    rather than assuming (see the fusion variant's same discipline above). `normalize`
+    passed straight through to build_windowed_temporal_features ("elapsed_time" default,
+    "gap_count" to reproduce the pre-fix normalization for comparison)."""
     split_df = df.loc[df["sequence_name"].isin(split_sequences)]
-    temporal = build_windowed_temporal_features(split_df, classes, temporal_features, n, stride).astype("float32")
+    temporal = build_windowed_temporal_features(
+        split_df, classes, temporal_features, n, stride, normalize=normalize,
+    ).astype("float32")
     y_check = _build_windowed_labels(split_df, classes, n, stride)
     assert len(y_check) == len(y_reference) == len(temporal), "window count mismatch building temporal variation"
     assert np.array_equal(y_check, y_reference), "temporal variation windows misaligned with embedding-sequence windows"
