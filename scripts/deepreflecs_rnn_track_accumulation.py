@@ -967,15 +967,24 @@ def collate_scan_sequences(
 def prepare_end_to_end_splits(
     df: pd.DataFrame, classes: list[str] = MLP_CLASSES, features: list[str] = REFLECTION_FEATURES,
     n: int = WINDOW_N, stride: int = STRIDE, splits: dict[str, list[str]] | None = None,
+    standardization_df: pd.DataFrame | None = None,
 ):
     """Returns the raw per-window scan-sequence lists and labels for each split, NOT a
     pre-padded dense array: collate_scan_sequences pads per mini-batch instead (see
     its docstring for why building one dense array up front OOMs on the full
-    dataset)."""
+    dataset).
+
+    standardization_df: same fix as compute_scan_embeddings' own parameter of the same
+    name. The warmstarted encoder's weights only make sense on inputs scaled the way it
+    was originally trained (sensor2 stats, see fit_reflection_standardization). Pass the
+    original sensor2 df here when df is a different sensor scope (e.g. all-sensor);
+    defaults to df itself (existing sensor2 behavior, unchanged)."""
     if splits is None:
         splits = load_split()
+    if standardization_df is None:
+        standardization_df = df
 
-    mean, std = fit_reflection_standardization(df, splits, classes, features)
+    mean, std = fit_reflection_standardization(standardization_df, splits, classes, features)
     df_std = standardize_features(df, mean, std, features)
 
     train_df = df_std.loc[df_std["sequence_name"].isin(splits["train"])]
@@ -1172,6 +1181,7 @@ def run_end_to_end_training(
     precompute_model_dir=None,
     output_dir=None,
     splits: dict[str, list[str]] | None = None,
+    standardization_df: pd.DataFrame | None = None,
 ):
     if precompute_model_dir is None:
         precompute_model_dir = RNN_DIR / f"N{n}_stride{stride}_gru_h{hidden_size}"
@@ -1191,6 +1201,7 @@ def run_end_to_end_training(
 
     train_seqs, y_train, val_seqs, y_val, test_seqs, y_test, max_seq_len = prepare_end_to_end_splits(
         df, classes=classes, features=features, n=n, stride=stride, splits=splits,
+        standardization_df=standardization_df,
     )
 
     if history_cache.exists() and model_cache.exists():

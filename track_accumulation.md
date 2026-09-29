@@ -1027,6 +1027,23 @@ Fine-tuning an already-good pooled encoder inside the fusion objective doesn't h
 this scale, consistent with the frozen encoder already sitting near this task's ceiling.
 Single split, not fold-validated.
 
+### End-to-end GRU, warmstart, N=20 all-sensor
+
+The actually-temporal counterpart to the pooled-branch warmstart above: no fusion, the
+GRU's own per-scan encoder unfrozen and fine-tuned jointly with the GRU, warmstarted
+from the separately-trained N=1 encoder + precompute GRU checkpoints.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU h=64 (frozen encoder, reference) | 0.944 | 0.829 | 0.875 | 0.900 | 0.900 | 0.8895 |
+| GRU h=64, end-to-end (warmstart) | 0.946 | 0.836 | 0.871 | 0.892 | 0.893 | 0.8878 |
+
+Below the frozen version (-0.0017). Third warmstart attempt at all-sensor scale
+(alongside the pooled-fusion warmstart above and the N=50 MLP-fusion warmstart), third
+one to land below its frozen baseline. The N=10 sensor2-only warmstart win (+0.006)
+increasingly reads as specific to that smaller, less diverse regime rather than a
+general property of warm-starting. Single split, not fold-validated.
+
 ## TLDR-Comparison
 
 Every variant tried in this branch, one row each, sorted by macro F1 descending. Smoothing variants excluded (post-hoc, not a distinct architecture/feature). "What was done" is the method itself, "Motivation" is why it was tried, "Result" is the outcome. Single-split numbers unless a fold mean/std is noted.
