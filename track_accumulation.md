@@ -1010,6 +1010,23 @@ used as a GRU input instead of a pooled fusion branch; fusion patches over about
 thirds of that loss but doesn't erase it, confirming which encoder wins depends on the
 role it's asked to play, not on which one is "better" in the abstract.
 
+### End-to-end DeepReflecs-fusion: warm-starting the pooled branch, N=20 all-sensor
+
+Same recipe as the MLP end-to-end fusion above, applied to the actual "Fusion (pooled +
+GRU h=64)" recipe: the pooled DeepReflecs encoder becomes a trainable sub-module
+(warmstarted from its already-trained checkpoint), GRU branch stays frozen/precomputed.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Fusion (frozen pooled embedding, reference) | 0.943 | 0.827 | 0.877 | 0.901 | 0.900 | 0.8897 |
+| Fusion, pooled DeepReflecs end-to-end (warmstart) | 0.942 | 0.822 | 0.870 | 0.900 | 0.900 | 0.8868 |
+
+Below the frozen version (-0.0029), same direction as the N=50 MLP-fusion warmstart
+result (-0.0034), opposite of the N=10 sensor2 GRU-encoder warmstart win (+0.006).
+Fine-tuning an already-good pooled encoder inside the fusion objective doesn't help at
+this scale, consistent with the frozen encoder already sitting near this task's ceiling.
+Single split, not fold-validated.
+
 ## TLDR-Comparison
 
 Every variant tried in this branch, one row each, sorted by macro F1 descending. Smoothing variants excluded (post-hoc, not a distinct architecture/feature). "What was done" is the method itself, "Motivation" is why it was tried, "Result" is the outcome. Single-split numbers unless a fold mean/std is noted.

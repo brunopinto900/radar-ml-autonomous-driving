@@ -2004,6 +2004,253 @@ def evaluate_fusion_mlp_e2e_test_metrics(
     return metrics_df
 
 
+# --- DeepReflecs pooled-branch counterpart to the MLP e2e fusion above: same idea
+# (the branch under test becomes a trainable sub-module, warmstarted from its
+# already-trained checkpoint; the GRU branch stays frozen/precomputed exactly as in
+# every other fusion variant), applied to the actual "Fusion (pooled + GRU h=64)"
+# recipe instead of the histogram-MLP one. ---
+
+
+def prepare_fusion_splits_deepreflecs_e2e(
+    df: pd.DataFrame, embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n: int = WINDOW_N,
+    stride: int = STRIDE, splits: dict[str, list[str]] | None = None, range_sc_mode: str = "broadcast",
+    gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE, gru_num_layers: int = GRU_LAYERS,
+) -> dict[str, tuple[list[np.ndarray], np.ndarray, np.ndarray]]:
+    """Like prepare_fusion_splits, but keeps the pooled branch's raw ragged point sets
+    (standardized, not yet encoded) instead of precomputed DeepReflecs embeddings: the
+    pooled encoder is about to become a trainable sub-module (see
+    FusionEndToEndDeepReflecs/train_fusion_deepreflecs_e2e below), fed the raw
+    standardized points directly. The GRU branch stays frozen/precomputed exactly as
+    in every other fusion variant, only the pooled branch becomes end-to-end
+    trainable, mirroring how prepare_fusion_splits_mlp_e2e only unfroze the
+    histogram-MLP encoder while its own GRU branch stayed frozen too."""
+    if splits is None:
+        splits = load_split()
+    if gru_model_dir is None:
+        gru_model_dir = RNN_DIR / f"N{n}_stride{stride}_gru_h{gru_hidden_size}"
+
+    mean, std = fit_pooled_standardization(df, splits, classes, REFLECTION_FEATURES, n, stride, range_sc_mode)
+
+    results = {}
+    for split_name in ("train", "val", "test"):
+        seqs = splits[split_name]
+        split_df = df.loc[df["sequence_name"].isin(seqs)]
+        point_sets, y_pooled = build_pooled_point_sets(split_df, classes, REFLECTION_FEATURES, n, stride, range_sc_mode)
+        point_sets = [(p - mean) / std for p in point_sets]
+
+        gru_hidden, y_gru = compute_gru_hidden_states(
+            embeddings_df, seqs, classes, n, stride, gru_model_dir, gru_hidden_size, gru_num_layers,
+        )
+
+        assert len(y_pooled) == len(y_gru), f"{split_name}: window count mismatch, {len(y_pooled)} vs {len(y_gru)}"
+        assert np.array_equal(y_pooled, y_gru), f"{split_name}: label mismatch, pooled/GRU windows are misaligned"
+
+        results[split_name] = (point_sets, gru_hidden, y_pooled)
+        print(f"fusion (deepreflecs e2e) {split_name}: {len(y_pooled)} windows, gru dim {gru_hidden.shape[1]}")
+
+    return results
+
+
+class FusionEndToEndDeepReflecs(nn.Module):
+    """The pooled DeepReflecs encoder (its point_dim-wide embedding, via
+    embed_points) is a trainable sub-module here, not a frozen precompute step:
+    gradients flow from the fusion head back through it. The GRU branch is not part
+    of this module at all, its hidden state arrives already fixed/precomputed, same
+    as every other fusion variant (mirrors FusionEndToEndMLP exactly, just with
+    DeepReflecs' raw point-set encoder instead of the histogram-MLP)."""
+
+    def __init__(
+        self, n_features: int, gru_dim: int, conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM,
+        fusion_hidden_dim: int = FUSION_MLP_HIDDEN_DIM, n_hidden_layers: int = 2, num_classes: int = len(MLP_CLASSES),
+    ):
+        super().__init__()
+        self.pooled_encoder = DeepReflecs(n_features, num_classes=num_classes, conv_dim=conv_dim, point_dim=point_dim)
+        self.head = MLP(
+            input_dim=point_dim + gru_dim, hidden_dim=fusion_hidden_dim, num_classes=num_classes,
+            n_hidden_layers=n_hidden_layers,
+        )
+
+    def forward(self, pooled_x: torch.Tensor, pooled_mask: torch.Tensor, gru_hidden: torch.Tensor) -> torch.Tensor:
+        pooled_embed = embed_points(self.pooled_encoder, pooled_x, pooled_mask)
+        combined = torch.cat([pooled_embed, gru_hidden], dim=-1)
+        return self.head(combined)
+
+
+def _predict_fusion_deepreflecs_e2e_in_batches(
+    model: FusionEndToEndDeepReflecs, pooled_sets: list[np.ndarray], gru_hidden_t: torch.Tensor, batch_size: int = 256,
+) -> torch.Tensor:
+    model.eval()
+    logits = []
+    with torch.no_grad():
+        for start in range(0, len(pooled_sets), batch_size):
+            batch_sets = pooled_sets[start : start + batch_size]
+            batch_m_max = max(p.shape[0] for p in batch_sets)
+            batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+            batch_x_t = torch.tensor(batch_x, device=DEVICE)
+            batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+            batch_gru = gru_hidden_t[start : start + batch_size]
+            logits.append(model(batch_x_t, batch_mask_t, batch_gru))
+    return torch.cat(logits, dim=0)
+
+
+def train_fusion_deepreflecs_e2e(
+    pooled_train: list[np.ndarray], gru_train: np.ndarray, y_train: np.ndarray,
+    pooled_val: list[np.ndarray], gru_val: np.ndarray, y_val: np.ndarray,
+    n_features: int = len(REFLECTION_FEATURES), classes: list[str] = MLP_CLASSES, epochs: int = EPOCHS,
+    batch_size: int = 64, lr: float = LEARNING_RATE, random_state: int = RANDOM_STATE, conv_dim: int = CONV_DIM,
+    point_dim: int = POINT_DIM, hidden_dim: int = FUSION_MLP_HIDDEN_DIM, n_hidden_layers: int = 2,
+    warmstart: bool = True, pooled_encoder_dir=POOLED_ENCODER_DIR,
+):
+    """Same Adam + class-weighted CE convention as every other trainer here.
+    warmstart=True (default, matching "End-to-end GRU, warmstart" beating its
+    random-init counterpart) loads the already-trained pooled DeepReflecs encoder's
+    weights into model.pooled_encoder before training; warmstart=False would leave it
+    randomly initialized (not exposed as a job here, only warmstart was requested).
+
+    Pooled point sets are ragged (variable points per window, heavy-tailed): padded
+    fresh per mini-batch (this batch's own max points), never the whole split at
+    once, same discipline as every other DeepReflecs trainer in this branch (see
+    collate_scan_sequences' docstring for why a whole-split dense array OOMs on this
+    dataset's point-count distribution)."""
+    torch.manual_seed(random_state)
+
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
+    weight_tensor = torch.tensor([weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE)
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
+
+    model = FusionEndToEndDeepReflecs(
+        n_features, gru_train.shape[1], conv_dim, point_dim, hidden_dim, n_hidden_layers, len(classes),
+    ).to(DEVICE)
+    if warmstart:
+        model.pooled_encoder.load_state_dict(torch.load(pooled_encoder_dir / "deepreflecs_model.pt", map_location=DEVICE))
+        print(f"warmstarted pooled_encoder from {pooled_encoder_dir / 'deepreflecs_model.pt'}")
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+
+    gru_train_t = torch.tensor(gru_train, device=DEVICE)
+    y_train_t = torch.tensor(y_train, device=DEVICE)
+    gru_val_t = torch.tensor(gru_val, device=DEVICE)
+    y_val_t = torch.tensor(y_val, device=DEVICE)
+
+    n = len(pooled_train)
+    history = []
+    for epoch in range(epochs):
+        model.train()
+        perm = np.random.permutation(n)
+        epoch_loss, epoch_correct = 0.0, 0
+        for start in range(0, n, batch_size):
+            idx = perm[start : start + batch_size]
+            batch_sets = [pooled_train[i] for i in idx]
+            batch_m_max = max(p.shape[0] for p in batch_sets)
+            batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+            batch_x_t = torch.tensor(batch_x, device=DEVICE)
+            batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+            batch_gru = gru_train_t[idx]
+            batch_y = y_train_t[idx]
+
+            optimizer.zero_grad()
+            logits = model(batch_x_t, batch_mask_t, batch_gru)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * len(idx)
+            epoch_correct += (logits.argmax(dim=1) == batch_y).sum().item()
+
+        train_loss = epoch_loss / n
+        train_acc = epoch_correct / n
+
+        val_logits = _predict_fusion_deepreflecs_e2e_in_batches(model, pooled_val, gru_val_t)
+        val_acc = (val_logits.argmax(dim=1) == y_val_t).float().mean().item()
+
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}", flush=True)
+
+    return model, history
+
+
+def run_fusion_training_deepreflecs_e2e(
+    df: pd.DataFrame, embeddings_df: pd.DataFrame, n: int = WINDOW_N, stride: int = STRIDE,
+    classes: list[str] = MLP_CLASSES, epochs: int = EPOCHS, batch_size: int = 64, lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE, conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM,
+    hidden_dim: int = FUSION_MLP_HIDDEN_DIM, n_hidden_layers: int = 2, range_sc_mode: str = "broadcast",
+    pooled_encoder_dir=POOLED_ENCODER_DIR, gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
+    gru_num_layers: int = GRU_LAYERS, output_dir=None, splits: dict[str, list[str]] | None = None,
+    warmstart: bool = True,
+):
+    if gru_model_dir is None:
+        gru_model_dir = RNN_DIR / f"N{n}_stride{stride}_gru_h{gru_hidden_size}"
+    if output_dir is None:
+        tag = "warmstart" if warmstart else "random"
+        output_dir = RNN_DIR / f"N{n}_stride{stride}_fusion_deepreflecs_e2e_{tag}_gru{gru_hidden_size}"
+    if splits is None:
+        splits = load_split()
+
+    splits_data = prepare_fusion_splits_deepreflecs_e2e(
+        df, embeddings_df, classes, n, stride, splits, range_sc_mode=range_sc_mode, gru_model_dir=gru_model_dir,
+        gru_hidden_size=gru_hidden_size, gru_num_layers=gru_num_layers,
+    )
+    pooled_train, gru_train, y_train = splits_data["train"]
+    pooled_val, gru_val, y_val = splits_data["val"]
+    pooled_test, gru_test, y_test = splits_data["test"]
+
+    model, history = train_fusion_deepreflecs_e2e(
+        pooled_train, gru_train, y_train, pooled_val, gru_val, y_val, n_features=len(REFLECTION_FEATURES),
+        classes=classes, epochs=epochs, batch_size=batch_size, lr=lr, random_state=random_state, conv_dim=conv_dim,
+        point_dim=point_dim, hidden_dim=hidden_dim, n_hidden_layers=n_hidden_layers, warmstart=warmstart,
+        pooled_encoder_dir=pooled_encoder_dir,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "fusion_model.pt")
+    print(f"Saved {output_dir / 'fusion_model.pt'}")
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, pooled_test, gru_test, y_test
+
+
+def evaluate_fusion_deepreflecs_e2e_test_metrics(
+    model: FusionEndToEndDeepReflecs, pooled_test: list[np.ndarray], gru_test: np.ndarray, y_test: np.ndarray,
+    classes: list[str] = MLP_CLASSES, output_dir=None, n: int = WINDOW_N, stride: int = STRIDE,
+    gru_hidden_size: int = HIDDEN_SIZE, warmstart: bool = True,
+) -> pd.DataFrame:
+    if output_dir is None:
+        tag = "warmstart" if warmstart else "random"
+        output_dir = RNN_DIR / f"N{n}_stride{stride}_fusion_deepreflecs_e2e_{tag}_gru{gru_hidden_size}"
+
+    from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
+
+    gru_test_t = torch.tensor(gru_test, device=DEVICE)
+    y_pred = _predict_fusion_deepreflecs_e2e_in_batches(model, pooled_test, gru_test_t).argmax(dim=1).cpu().numpy()
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_test, y_pred, labels=range(len(classes)), zero_division=0
+    )
+    metrics_df = pd.DataFrame({"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes)
+
+    tag = "warmstart" if warmstart else "random"
+    print(f"per-class precision/recall/f1 (test, fusion deepreflecs-e2e ({tag})+gru{gru_hidden_size}):")
+    print(metrics_df.round(3).to_string())
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_json(output_dir / "fusion_test_metrics.json", orient="index", indent=2)
+    print(f"Saved {output_dir / 'fusion_test_metrics.json'}")
+
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(y_test, y_pred, labels=range(len(classes)), normalize="true")
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
+    ax.set_title(f"Fusion (DeepReflecs end-to-end, {tag} + GRU h={gru_hidden_size}): test confusion matrix")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    fig.tight_layout()
+    confusion_matrix_path = output_dir / "fusion_test_confusion_matrix.png"
+    fig.savefig(confusion_matrix_path, dpi=150)
+    print(f"Saved {confusion_matrix_path}")
+
+    return metrics_df
+
+
 # --- temporal-variation scalar, appended to the GRU/transformer's own summary ---
 # (see track_accumulation.md discussion): the cheap hand-built summed-diff statistic
 # concatenated onto the sequence model's final representation, sidestepping whatever
