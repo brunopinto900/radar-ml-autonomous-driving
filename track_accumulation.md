@@ -992,7 +992,23 @@ inside one). Which encoder wins depends on the role it's asked to play, not on w
 is "better" in the abstract.
 
 Fusion on top of this (pooled N=20 all-sensor histogram-MLP branch + this new MLP-
-embedding GRU's hidden state) still running; result to follow.
+embedding GRU's hidden state), same `run_fusion_training_mlp` used by every other MLP-
+branch fusion variant, just pointed at the new GRU checkpoint:
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU h=64, MLP-histogram embeddings (alone) | 0.937 | 0.791 | 0.846 | 0.899 | 0.884 | 0.8713 |
+| Fusion (pooled MLP + MLP-embedding GRU) | 0.940 | 0.814 | 0.869 | 0.898 | 0.892 | **0.8823** |
+
+Fusion recovers +0.0110 over the standalone MLP-embedding GRU, a real gain (the pooled
+branch is doing genuine work, same pattern as every other fusion variant here), but it
+still lands below both DeepReflecs-based references (GRU 0.8895, fusion 0.8897) and
+below point-attention (0.8847). It does beat Mamba (0.8816) and clearly beats the
+standalone MLP-embedding GRU (0.8713), so not the worst result in the family, just not a
+win. Net read on the whole detour: the histogram-MLP encoder costs real accuracy when
+used as a GRU input instead of a pooled fusion branch; fusion patches over about two-
+thirds of that loss but doesn't erase it, confirming which encoder wins depends on the
+role it's asked to play, not on which one is "better" in the abstract.
 
 ## TLDR-Comparison
 
@@ -1019,6 +1035,7 @@ Every variant tried in this branch, one row each, sorted by macro F1 descending.
 | GRU h=64, 3 layers | Same GRU h=64 config, num_layers raised from 1 to 3 | 20 | DeepReflecs | all-sensor | 0.8862 | Depth ablation: is this line capacity-starved on depth the way width was already ruled out (h=128 loses to h=64 here) | Below 1-layer GRU (-0.0033); train_acc keeps climbing past epoch 40 while val_acc plateaus, same overfitting shape as the width ablation, third confirmation this line isn't capacity-starved at all-sensor scale |
 | Point-attention | New architecture: every pooled point across all N scans is one self-attention token, tagged with its own per-point recency, jointly learning aggregation and order instead of splitting them across two frozen branches (new module `deepreflecs_point_attention_track_accumulation.py`); point count capped at 300 (derived from real p99=269 stats) to bound attention's O(M^2) cost | 20 | DeepReflecs | all-sensor | 0.8847 | Test the diagnosis motivating fusion directly: does jointly learning cross-frame point aggregation and order recover more than gluing two frozen branches together after the fact | Worst N=20 all-sensor result of the whole GRU/fusion family, below even the 3-layer GRU; ~5 hours of GPU time, the branch's biggest architectural departure, and it lost ground rather than gained it, real evidence the diagnosis was wrong, not just an unlucky run |
 | GRU h=128 + temporal variation | Same all-sensor gap-fill, h=128+temporal | 20 | DeepReflecs | all-sensor | 0.8844 | Direct N=20 counterpart to the N=50 all-sensor combined config | Below h=128 alone (-0.0023), same direction as every other temporal-variation test at scale; fourth independent confirmation of the regression |
+| Fusion (pooled MLP + MLP-embedding GRU) | Fusion, same `run_fusion_training_mlp` used by every other MLP-branch fusion variant, pointed at the new MLP-embedding GRU checkpoint instead of the DeepReflecs-embedding one | 20 | MLP | all-sensor | 0.8823 | Check whether fusion's pooled branch recovers what the MLP-embedding GRU lost relative to DeepReflecs | +0.0110 over the standalone MLP-embedding GRU, a real recovery, but still below both DeepReflecs-based references and point-attention; patches roughly two-thirds of the encoder-swap loss, doesn't erase it |
 | Transformer d=32 (plain) | Same all-sensor gap-fill, Transformer | 20 | DeepReflecs | all-sensor | 0.8820 | Direct N=20 counterpart to the N=50 all-sensor Transformer result | Weakest of the five GRU/Transformer/fusion variants at N=20, same relative ordering as N=50 |
 | Mamba | New architecture: sequence-mixing layer swapped from GRU to a selective state-space model (S6), same frozen per-scan embeddings and windowing (new module `deepreflecs_mamba_track_accumulation.py`); hit and fixed a numerical instability in a naive vectorized scan (see above), reverted to the correct sequential loop with batch size raised to 2048 to fix the resulting kernel-launch-overhead slowdown | 20 | DeepReflecs | all-sensor | 0.8816 | Test input-dependent per-channel gating against a GRU's single shared gate, motivated by matching real-time O(1)-streaming deployment constraints without a Transformer's KV cache | New worst N=20 all-sensor result, below point-attention (-0.0031) and GRU alone (-0.0079), despite mid-training val_acc peaks (~0.892-0.893) higher than the GRU/fusion references ever showed; second architecturally more expensive, more expressive replacement for GRU (after point-attention) to underperform it, same pattern both times |
 | GRU h=64, MLP-histogram embeddings | Same GRU architecture as the DeepReflecs-embedding reference, but the per-scan encoder feeding its recurrence is a newly-trained N=1 histogram-MLP (`compute_scan_embeddings_mlp`, new function) instead of DeepReflecs' point-set network; motivated by the frozen-MLP-embedding fusion's own win (0.9048, N=50), never before tested as a GRU input rather than a pooled fusion branch | 20 | MLP | all-sensor | 0.8713 | Test whether the histogram-MLP encoder that won as a pooled fusion branch also wins when fed through the GRU's own recurrence instead | Worst N=20 all-sensor result of the whole family, -0.0182 below the DeepReflecs-embedding GRU reference, real and large, not noise; the encoder that helped as a static pooled summary made the sequence model itself worse, which encoder wins depends on the role it plays |
