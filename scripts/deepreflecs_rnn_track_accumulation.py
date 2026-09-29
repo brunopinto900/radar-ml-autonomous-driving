@@ -25,6 +25,7 @@ LSTM in Hassan et al. 2024 (EuRAD, "Classification of Tracked Objects Using Mult
 Frame Processing for Automotive Radar"): a verdict at scan t must only depend on scans
 up to and including t, so it stays usable in real-time streaming inference, matching
 every other variant in this branch."""
+import functools
 import json
 
 import numpy as np
@@ -1389,46 +1390,72 @@ def compute_gru_hidden_states(
     return torch.cat(hidden_states, dim=0).cpu().numpy(), labels
 
 
+def _prepare_fusion_splits_core(
+    embeddings_df: pd.DataFrame,
+    splits: dict[str, list[str]],
+    branch_fn,
+    branch_name: str,
+    classes: list[str],
+    n: int,
+    stride: int,
+    gru_model_dir,
+    gru_hidden_size: int,
+    gru_num_layers: int,
+    print_prefix: str = "",
+) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Shared core of every prepare_fusion_splits_* variant (pooled DeepReflecs, pooled
+    MLP, raw histogram, ...): the two branches (a "pooled" embedding built by
+    `branch_fn(split_sequences) -> (embedding, labels)`, and the GRU hidden state,
+    always computed the same way) are built independently per split and concatenated.
+    Alignment is verified explicitly (assert equal label arrays) rather than trusted
+    from matching iteration order alone: both branches derive from the same underlying
+    scan universe (same points table, same class filter, same n/stride), so identical
+    labels in identical positions is the correct, checkable invariant. Every variant
+    differs only in what `branch_fn` builds; this loop, the assertions, and the printed
+    shape summary are otherwise identical across all of them."""
+    results = {}
+    for split_name in ("train", "val", "test"):
+        seqs = splits[split_name]
+        branch_embed, y_branch = branch_fn(seqs)
+        gru_hidden, y_gru = compute_gru_hidden_states(
+            embeddings_df, seqs, classes, n, stride, gru_model_dir, gru_hidden_size, gru_num_layers,
+        )
+
+        assert len(y_branch) == len(y_gru), f"{split_name}: window count mismatch, {len(y_branch)} vs {len(y_gru)}"
+        assert np.array_equal(y_branch, y_gru), f"{split_name}: label mismatch, {branch_name}/GRU windows are misaligned"
+
+        X = np.hstack([branch_embed, gru_hidden])
+        results[split_name] = (X, y_branch)
+        print(
+            f"fusion{print_prefix} {split_name}: {X.shape[0]} windows, feature dim {X.shape[1]} "
+            f"({branch_name} {branch_embed.shape[1]} + gru {gru_hidden.shape[1]})"
+        )
+
+    return results
+
+
 def prepare_fusion_splits(
     df: pd.DataFrame, embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n: int = WINDOW_N,
     stride: int = STRIDE, splits: dict[str, list[str]] | None = None, range_sc_mode: str = "broadcast",
     pooled_encoder_dir=POOLED_ENCODER_DIR, gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
     gru_num_layers: int = GRU_LAYERS,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """Builds [pooled_embedding ; gru_hidden_state] per window for each split. The
-    two branches are built independently (different dataframes, different code
-    paths), so alignment is verified explicitly (assert equal label arrays) rather
-    than trusted from matching iteration order alone: both derive from the same
-    underlying scan universe (same points table, same class filter, same n/stride),
-    so identical labels in identical positions is the correct, checkable invariant."""
+    """Builds [pooled_embedding ; gru_hidden_state] per window for each split (pooled
+    DeepReflecs branch, see _prepare_fusion_splits_core for the shared mechanics)."""
     if splits is None:
         splits = load_split()
     if gru_model_dir is None:
         gru_model_dir = RNN_DIR / f"N{n}_stride{stride}_gru_h{gru_hidden_size}"
 
     mean, std = fit_pooled_standardization(df, splits, classes, REFLECTION_FEATURES, n, stride, range_sc_mode)
-
-    results = {}
-    for split_name in ("train", "val", "test"):
-        seqs = splits[split_name]
-        pooled_embed, y_pooled = compute_pooled_embeddings(
-            df, seqs, mean, std, classes, REFLECTION_FEATURES, n, stride, range_sc_mode, pooled_encoder_dir,
-        )
-        gru_hidden, y_gru = compute_gru_hidden_states(
-            embeddings_df, seqs, classes, n, stride, gru_model_dir, gru_hidden_size, gru_num_layers,
-        )
-
-        assert len(y_pooled) == len(y_gru), f"{split_name}: window count mismatch, {len(y_pooled)} vs {len(y_gru)}"
-        assert np.array_equal(y_pooled, y_gru), f"{split_name}: label mismatch, pooled/GRU windows are misaligned"
-
-        X = np.hstack([pooled_embed, gru_hidden])
-        results[split_name] = (X, y_pooled)
-        print(
-            f"fusion {split_name}: {X.shape[0]} windows, feature dim {X.shape[1]} "
-            f"(pooled {pooled_embed.shape[1]} + gru {gru_hidden.shape[1]})"
-        )
-
-    return results
+    branch_fn = functools.partial(
+        compute_pooled_embeddings, df, mean=mean, std=std, classes=classes, features=REFLECTION_FEATURES,
+        n=n, stride=stride, range_sc_mode=range_sc_mode, encoder_dir=pooled_encoder_dir,
+    )
+    return _prepare_fusion_splits_core(
+        embeddings_df, splits, branch_fn, "pooled", classes, n, stride, gru_model_dir, gru_hidden_size,
+        gru_num_layers,
+    )
 
 
 def compute_pooled_mlp_embeddings(
@@ -1487,26 +1514,15 @@ def prepare_fusion_splits_mlp(
     # and at all-sensor N=50 scale leaving these bound for the rest of the function nearly doubles peak RSS
     # during the train split's own point-set build (see track_accumulation.md's OOM writeup)
 
-    results = {}
-    for split_name in ("train", "val", "test"):
-        seqs = splits[split_name]
-        mlp_embed, y_mlp = compute_pooled_mlp_embeddings(
-            df, seqs, edges, classes, MLP_FEATURES, n, stride, range_sc_mode, mlp_encoder_dir, n_bins,
-            include_doppler_spread,
-        )
-        gru_hidden, y_gru = compute_gru_hidden_states(embeddings_df, seqs, classes, n, stride, gru_model_dir, gru_hidden_size)
-
-        assert len(y_mlp) == len(y_gru), f"{split_name}: window count mismatch, {len(y_mlp)} vs {len(y_gru)}"
-        assert np.array_equal(y_mlp, y_gru), f"{split_name}: label mismatch, MLP/GRU windows are misaligned"
-
-        X = np.hstack([mlp_embed, gru_hidden])
-        results[split_name] = (X, y_mlp)
-        print(
-            f"fusion (mlp) {split_name}: {X.shape[0]} windows, feature dim {X.shape[1]} "
-            f"(mlp {mlp_embed.shape[1]} + gru {gru_hidden.shape[1]})"
-        )
-
-    return results
+    branch_fn = functools.partial(
+        compute_pooled_mlp_embeddings, df, edges=edges, classes=classes, features=MLP_FEATURES, n=n, stride=stride,
+        range_sc_mode=range_sc_mode, encoder_dir=mlp_encoder_dir, n_bins=n_bins,
+        include_doppler_spread=include_doppler_spread,
+    )
+    return _prepare_fusion_splits_core(
+        embeddings_df, splits, branch_fn, "mlp", classes, n, stride, gru_model_dir, gru_hidden_size,
+        GRU_LAYERS, print_prefix=" (mlp)",
+    )
 
 
 def train_fusion_mlp(
@@ -1568,6 +1584,35 @@ def train_fusion_mlp(
     return model, history
 
 
+def _run_fusion_training_core(
+    splits_data: dict[str, tuple[np.ndarray, np.ndarray]],
+    classes: list[str],
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    random_state: int,
+    hidden_dim: int,
+    n_hidden_layers: int,
+    output_dir,
+):
+    """Shared tail of every run_fusion_training_* variant: train the fusion head on
+    whatever splits_data a prepare_fusion_splits_* variant produced, save, plot, and
+    return. Identical across variants; only how splits_data was built differs."""
+    X_train, y_train = splits_data["train"]
+    X_val, y_val = splits_data["val"]
+    X_test, y_test = splits_data["test"]
+
+    model, history = train_fusion_mlp(
+        X_train, y_train, X_val, y_val, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "fusion_model.pt")
+    print(f"Saved {output_dir / 'fusion_model.pt'}")
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, X_test, y_test
+
+
 def run_fusion_training(
     df: pd.DataFrame, embeddings_df: pd.DataFrame, n: int = WINDOW_N, stride: int = STRIDE,
     classes: list[str] = MLP_CLASSES, epochs: int = EPOCHS, batch_size: int = BATCH_SIZE, lr: float = LEARNING_RATE,
@@ -1587,19 +1632,9 @@ def run_fusion_training(
         pooled_encoder_dir=pooled_encoder_dir, gru_model_dir=gru_model_dir, gru_hidden_size=gru_hidden_size,
         gru_num_layers=gru_num_layers,
     )
-    X_train, y_train = splits_data["train"]
-    X_val, y_val = splits_data["val"]
-    X_test, y_test = splits_data["test"]
-
-    model, history = train_fusion_mlp(
-        X_train, y_train, X_val, y_val, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers,
+    return _run_fusion_training_core(
+        splits_data, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers, output_dir,
     )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), output_dir / "fusion_model.pt")
-    print(f"Saved {output_dir / 'fusion_model.pt'}")
-    plot_training_curves(history, output_dir=output_dir)
-    return model, history, X_test, y_test
 
 
 def run_fusion_training_mlp(
@@ -1625,19 +1660,9 @@ def run_fusion_training_mlp(
         range_sc_mode=range_sc_mode, gru_model_dir=gru_model_dir, gru_hidden_size=gru_hidden_size,
         n_bins=n_bins, include_doppler_spread=include_doppler_spread,
     )
-    X_train, y_train = splits_data["train"]
-    X_val, y_val = splits_data["val"]
-    X_test, y_test = splits_data["test"]
-
-    model, history = train_fusion_mlp(
-        X_train, y_train, X_val, y_val, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers,
+    return _run_fusion_training_core(
+        splits_data, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers, output_dir,
     )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), output_dir / "fusion_model.pt")
-    print(f"Saved {output_dir / 'fusion_model.pt'}")
-    plot_training_curves(history, output_dir=output_dir)
-    return model, history, X_test, y_test
 
 
 def compute_pooled_histogram_features(
@@ -1681,25 +1706,14 @@ def prepare_fusion_splits_histogram(
     edges = fit_quantile_edges(train_point_sets, MLP_FEATURES, n_bins)
     del train_df, train_point_sets  # only needed for edge-fitting; see prepare_fusion_splits_mlp's comment
 
-    results = {}
-    for split_name in ("train", "val", "test"):
-        seqs = splits[split_name]
-        hist_features, y_hist = compute_pooled_histogram_features(
-            df, seqs, edges, classes, MLP_FEATURES, n, stride, range_sc_mode, n_bins, include_doppler_spread,
-        )
-        gru_hidden, y_gru = compute_gru_hidden_states(embeddings_df, seqs, classes, n, stride, gru_model_dir, gru_hidden_size)
-
-        assert len(y_hist) == len(y_gru), f"{split_name}: window count mismatch, {len(y_hist)} vs {len(y_gru)}"
-        assert np.array_equal(y_hist, y_gru), f"{split_name}: label mismatch, histogram/GRU windows are misaligned"
-
-        X = np.hstack([hist_features, gru_hidden])
-        results[split_name] = (X, y_hist)
-        print(
-            f"fusion (histogram) {split_name}: {X.shape[0]} windows, feature dim {X.shape[1]} "
-            f"(histogram {hist_features.shape[1]} + gru {gru_hidden.shape[1]})"
-        )
-
-    return results
+    branch_fn = functools.partial(
+        compute_pooled_histogram_features, df, edges=edges, classes=classes, features=MLP_FEATURES, n=n,
+        stride=stride, range_sc_mode=range_sc_mode, n_bins=n_bins, include_doppler_spread=include_doppler_spread,
+    )
+    return _prepare_fusion_splits_core(
+        embeddings_df, splits, branch_fn, "histogram", classes, n, stride, gru_model_dir, gru_hidden_size,
+        GRU_LAYERS, print_prefix=" (histogram)",
+    )
 
 
 def run_fusion_training_histogram(
@@ -1724,19 +1738,9 @@ def run_fusion_training_histogram(
         df, embeddings_df, classes, n, stride, splits, range_sc_mode=range_sc_mode, gru_model_dir=gru_model_dir,
         gru_hidden_size=gru_hidden_size, n_bins=n_bins, include_doppler_spread=include_doppler_spread,
     )
-    X_train, y_train = splits_data["train"]
-    X_val, y_val = splits_data["val"]
-    X_test, y_test = splits_data["test"]
-
-    model, history = train_fusion_mlp(
-        X_train, y_train, X_val, y_val, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers,
+    return _run_fusion_training_core(
+        splits_data, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers, output_dir,
     )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), output_dir / "fusion_model.pt")
-    print(f"Saved {output_dir / 'fusion_model.pt'}")
-    plot_training_curves(history, output_dir=output_dir)
-    return model, history, X_test, y_test
 
 
 def evaluate_fusion_test_metrics(
