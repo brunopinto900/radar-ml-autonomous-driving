@@ -538,6 +538,7 @@ DeepReflecs (point-set) family, single canonical split:
 | N=5, broadcast range_sc | 0.904 | 0.782 | 0.761 | 0.798 | 0.809 | 0.811 |
 | N=5, raw range_sc | 0.905 | 0.782 | 0.759 | 0.800 | 0.812 | 0.812 |
 | N=10 | 0.909 | 0.786 | 0.776 | 0.820 | 0.834 | 0.825 |
+| N=50 | 0.923 | 0.812 | 0.824 | 0.846 | 0.859 | 0.8527 |
 
 Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless noted, same split:
 
@@ -570,6 +571,11 @@ Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless 
 | N=10, DeepReflecs+GRU (h=64) + temporal variation scalar, sensor-2-only | 0.929 | 0.807 | 0.845 | 0.845 | 0.873 | 0.860 |
 | N=10, DeepReflecs+causal Transformer (d=32) + temporal variation scalar, sensor-2-only | 0.914 | 0.782 | 0.818 | 0.844 | 0.867 | 0.845 |
 | N=10, orthogonalized fusion (pooled residual + GRU h=64 + temporal variation), sensor-2-only | 0.923 | 0.785 | 0.850 | 0.842 | 0.872 | 0.854 |
+| N=50, pooled point-set control (no fusion), sensor-2-only | 0.923 | 0.812 | 0.824 | 0.846 | 0.859 | 0.8527 |
+| N=50, DeepReflecs+GRU (h=64), no temporal, sensor-2-only | 0.937 | 0.804 | 0.870 | 0.870 | 0.894 | 0.875 |
+| N=50, orthogonalized fusion (pooled residual + GRU h=64 + temporal), sensor-2-only | 0.954 | 0.750 | 0.865 | 0.876 | 0.902 | 0.8755 |
+| N=50, fusion (pooled + GRU h=64), no temporal, sensor-2-only | 0.954 | 0.761 | 0.864 | 0.876 | 0.902 | 0.877 |
+| N=50, DeepReflecs+GRU (h=128), no temporal, sensor-2-only | 0.944 | 0.833 | 0.877 | 0.875 | 0.907 | 0.887 |
 | N=50, DeepReflecs+GRU (h=64) + temporal variation scalar, sensor-2-only | 0.952 | 0.790 | 0.884 | 0.871 | 0.899 | **0.883** |
 
 6-fold validated (val split, mean across folds, different rotating splits, not the canonical one above):
@@ -582,6 +588,412 @@ Quantile-bin histogram MLP family, all raw range_sc, no `doppler_spread` unless 
 
 Best single-split number in the branch is all-sensor N=50 + temporal variation at 0.881 (raw, unsmoothed), stacking both real levers found this session: more real time per track (large N) and more real detections per track (cross-sensor handoff). Post-hoc smoothing helps at N=10 (+0.005) but not at N=50 (-0.001), likely because heavily overlapping N=50 windows are already autocorrelated before any smoothing. Nothing here is fold-validated. Everything from the shape/sign attempts onward is from one session's worth of exploration on the same canonical split. Next step: fold-validate this configuration before treating 0.881 as an established number rather than a single-split result.
 
+### Pooled DeepReflecs point-set at N=50: a second, different OOM (and a fix that wasn't enough)
+
+Attempted the pooled DeepReflecs point-set baseline (the direct N=50 counterpart of the N=10 row above, 0.825) as part of the N=50 gap-filling queue. Crashed with `torch.AcceleratorError: CUDA error: unknown error` at the `torch.tensor(X_train, device=DEVICE)` line in `train_deepreflecs` (`scripts/deepreflecs_classifier.py:245`), before a single epoch ran.
+
+Found by reading the job's log: the traceback sits right above the pipeline's own status line, `N=50 stride=1 range_sc_mode=broadcast: windows train=358210 val=71114 test=69723, m_max=1481`. That line is printed by `prepare_windowed_split_point_sets` after padding is already decided, so it's the size the crashing tensor was actually allocated at.
+
+Root cause, distinct from the end-to-end OOM above: `m_max` there is computed globally across train+val+test combined (`deepreflecs_track_accumulation.py:176`, `max(p.shape[0] for p in (*train_sets, *val_sets, *test_sets))`), then every window in every split is padded to that one shared value via `pad_to_fixed`. At N=10 the worst-case window across the whole dataset still only has a modest point count; at N=50, summing real per-scan detections over 50 consecutive scans lets one dense track (busy scene, large_vehicle, whatever) push the global max to 1481, and every other window, most of which have a small fraction of that, gets padded up to match. `train_deepreflecs` then moves the entire padded split to the GPU in one shot rather than per batch (`X_train_t = torch.tensor(X_train, device=DEVICE)`, before the batching loop starts). With 5 features and float32, `X_train` alone is 358210 x 1481 x 5 x 4 bytes, about 9.9GB, before `X_val` (about 2.1GB), the two mask tensors, the model, and optimizer state are added on top. That combination is what the GPU rejected.
+
+This never showed up at N=10 for two independent reasons stacking: the per-window point count ceiling is naturally lower with fewer scans summed, and the global (not per-split) m_max convention only becomes expensive once that ceiling gets large. Notably, `compute_pooled_embeddings` and `fit_pooled_standardization` elsewhere in `deepreflecs_rnn_track_accumulation.py` already compute `m_max` per split rather than globally, so the GRU/Transformer/fusion line's own pooled-embedding step doesn't have this exposure, only this older, direct point-set trainer does.
+
+**First fix, applied: batch the GPU transfer.** Changed `train_deepreflecs`, `_predict_in_batches`, `_evaluate_metrics`, and `compute_pooled_embeddings` to keep the padded split on CPU and move only each mini-batch to the GPU inside the loop (`X_train[idx].to(DEVICE)`), instead of `torch.tensor(X_train, device=DEVICE)` moving the whole split at once. Smoke-tested on a tiny 3-sequence subset (m_max=1064 at that reduced scale): trained and evaluated without a CUDA error, confirming the mechanism works. Real machine's GPU (RTX 2060, 6GB VRAM) genuinely cannot hold a 9.9GB tensor, so this fix was correct and necessary for the GPU side of the problem.
+
+**It wasn't sufficient.** Relaunched the real, full-scale job and it died again, this time with a completely empty log, no traceback at all. `dmesg` explained it: a real Linux OOM-kill, `Out of memory: Killed process ... anon-rss:12359692kB` on a 12GB machine, confirmed this time (unlike the earlier full-environment crash, which had no dmesg entry). This is a different failure mode than the first crash: the first one was a caught Python exception (GPU allocation failing, with a full traceback); this one is the kernel killing the process outright because it was resident at essentially the entire machine's RAM.
+
+Root cause the first fix didn't touch: `pad_to_fixed` builds the dense `(n_windows, m_max, n_features)` array in plain CPU/numpy memory before anything ever reaches a `torch.tensor` call. At the global m_max=1481, `X_train` alone is already ~9.9GB and `X_val` ~2.1GB, in ordinary system RAM, regardless of whether the GPU transfer is batched or not. Moving the GPU transfer to per-batch removed a redundant full-size copy that used to sit on the GPU at the same time as the CPU copy, but the CPU-resident array by itself was already close to the entire 12GB ceiling, so that removal didn't buy enough headroom. The smoke test didn't catch this because its 3-sequence subset was small enough (m_max=1064, ~20k windows instead of 358k) to fit in RAM even before the fix, so it could never have exposed a CPU-memory problem at that scale, it only proved the GPU-transfer mechanism was wired correctly.
+
+Queue moved on regardless (`;`-chained, not `&&`), so this didn't block the rest of the N=50 batch. But the two jobs downstream of this checkpoint (fusion, orthogonalized fusion) both failed cleanly with `FileNotFoundError` on the missing `deepreflecs_model.pt`, since neither ever got a trained N=50 pooled encoder to load.
+
+**Second fix, real this time: per-batch padding, never one dense array for a whole split.** Added `prepare_windowed_split_point_sets_ragged`, `train_deepreflecs_ragged`, and `_predict_in_batches_ragged` to `deepreflecs_track_accumulation.py`: point sets stay a ragged `list[np.ndarray]` all the way through, standardization mean/std are computed by concatenating train's real points directly (no padding needed at all for that, padding would only add zeros that get masked back out anyway), and `pad_to_fixed` is called fresh inside the batch loop on that batch's own point sets only, same mechanism already proven for the end-to-end variant's `collate_scan_sequences`. This bounds peak memory analytically, not empirically: a training batch is at most `batch_size(128) x that_batch's_own_max_points x 5 features x 4 bytes`, a few MB even in the worst case where one batch happens to contain the single densest window in the whole dataset, versus the ~9.9GB the whole-split version needed. Smoke-tested on the same 3-sequence subset first (matching train/val accuracy trajectory to the original dense implementation, within normal seed noise), then run for real: **completed successfully, macro F1 0.8527** (car 0.923, large_vehicle 0.812, two_wheeler 0.824, pedestrian 0.846, pedestrian_group 0.859), the first time this variant has ever finished at N=50. `deepreflecs_model.pt` saved to `TRACK_ACC_DIR/N50_stride1`, same path fusion expects.
+
+**The identical bug was also sitting one level up, and needed the same fix.** Relaunching fusion at N=50 with a real N=50 pooled encoder now available, it OOM-killed too (dmesg-confirmed, same ~12.36GB signature), before the point-set trainer fix ever mattered: `fit_pooled_standardization` and `compute_pooled_embeddings` in `deepreflecs_rnn_track_accumulation.py` compute `m_max` per split (not globally, as already noted above), but still called `pad_to_fixed` on the *whole* split at once, at that split's own m_max. The earlier read that "per-split m_max didn't OOM" (based on the first fusion attempt reaching the model-loading step before failing) was wrong, it had only gotten through `fit_pooled_standardization`'s single padded array; doing the equivalent construction a second time inside `compute_pooled_embeddings` for the same train split, without the first array ever being freed, is what actually pushed it over. Applied the identical per-batch fix to both functions (`fit_pooled_standardization` now just concatenates ragged points for the mean/std, no padding at all; `compute_pooled_embeddings` pads per mini-batch inside its inference loop, same as `_predict_in_batches_ragged`). Smoke-tested on the 3-sequence subset again, then relaunched for real, see results below.
+
+**Also found, unrelated to memory: a matplotlib backend hang.** While smoke-testing, the ragged trainer stalled indefinitely inside `plot_training_curves`, confirmed via `py-spy` stack trace to be `matplotlib` trying to auto-detect an interactive GUI backend and probing a stale `$DISPLAY` (WSL2 X-forwarding address with nothing listening). Every job in this branch calls this same function. Fixed by setting `MPLBACKEND=Agg` before launching, forcing the headless backend and skipping the probe entirely; applied to all launches from this point on.
+
+### Fusion (pooled + GRU), revisited at N=50
+
+With a real N=50 pooled point-set encoder finally trained (above), the N=10 fusion experiment (pooled DeepReflecs embedding concatenated with the GRU's hidden state) could be re-run at the branch's actual best N for the first time.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Pooled point-set alone, N=50 | 0.923 | 0.812 | 0.824 | 0.846 | 0.859 | 0.8527 |
+| GRU h=64 alone, N=50 (no temporal) | 0.937 | 0.804 | 0.870 | 0.870 | 0.894 | 0.875 |
+| Fusion (pooled + GRU h=64), N=50 | 0.954 | 0.761 | 0.864 | 0.876 | 0.902 | **0.877** |
+| Fusion (pooled + GRU h=64), N=10 (reference) | 0.923 | 0.787 | 0.847 | 0.840 | 0.868 | 0.853 |
+
++0.0017 over GRU alone, essentially nothing, well inside the val-oscillation noise band flagged in the caveat above. At N=10 the identical fusion mechanism was worth +0.006. Consistent with the pattern seen everywhere else tonight: as the GRU branch gets stronger (bigger N here, more capacity in the h=128 case earlier), whatever the pooled/temporal side-channel was contributing keeps shrinking toward zero rather than adding a stable increment. large_vehicle is notably worse under fusion (0.761) than either branch alone (0.812, 0.804), the one class where combining the two representations actively hurts rather than just failing to help. Single split, not fold-validated.
+
+**Orthogonalized three-way fusion, also revisited at N=50.** Same residualize-then-concatenate fix as the N=10 version (regress the pooled embedding on the temporal scalars, keep only the residual, concatenate with the GRU hidden state and the temporal scalars themselves).
+
+| config | macro F1 |
+|---|---|
+| GRU, h=64, N=50 + temporal variation | **0.883** |
+| Fusion (pooled + GRU h=64), N=50, no temporal | 0.877 |
+| Orthogonalized fusion (pooled residual + GRU h=64 + temporal), N=50 | 0.8755 |
+| Orthogonalized fusion, N=10 (reference) | 0.854 |
+
+Same ordering as N=10: orthogonalized fusion lands below GRU+temporal alone (-0.0075), not between it and plain fusion. Confirms the N=10 finding generalizes rather than being an artifact of that smaller window: once the temporal scalar is available directly, the pooled branch's residual (whatever's left after removing the part that overlaps with temporal) isn't carrying independent classification-relevant signal, at either N. Closes the three-way fusion question at the branch's actual best N, not just at N=10. Single split, not fold-validated.
+
+### GRU capacity ablation and no-temporal control, at N=50
+
+Direct N=50 counterparts of the N=10 capacity ablation (h=64 vs h=128, no temporal variation scalar), to isolate how much of the 0.883 GRU+temporal result comes from N=50 itself versus the added scalar.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU, h=64, N=10 (no temporal) | 0.918 | 0.775 | 0.842 | 0.839 | 0.862 | 0.847 |
+| GRU, h=64, N=50 (no temporal) | 0.937 | 0.804 | 0.870 | 0.870 | 0.894 | **0.8748** |
+| GRU, h=64, N=50 + temporal variation | 0.952 | 0.790 | 0.884 | 0.871 | 0.899 | 0.883 |
+| GRU, h=128, N=10 (no temporal) | 0.930 | 0.813 | 0.845 | 0.848 | 0.874 | 0.862 |
+| GRU, h=128, N=50 (no temporal) | 0.944 | 0.833 | 0.877 | 0.875 | 0.907 | **0.8874** |
+
+Isolating N=50 alone (no temporal scalar) from the earlier 0.883: +0.0278 over the N=10 GRU baseline, and the temporal scalar adds only +0.0082 more on top (0.8748 to 0.883), smaller than its +0.013 contribution at N=10. Same pattern as the pooled MLP line elsewhere in this doc (temporal variation's marginal gain shrinks as N grows), consistent with a bigger window implicitly carrying more of what the explicit scalar used to supply.
+
+Capacity still helps more than the scalar at N=50: h=128 alone (0.8874) beats h=64+temporal (0.883), the same ordering already seen at N=10 (h=128 alone 0.862 vs h=64+temporal 0.860). Doubling width remains a bigger lever than the temporal feature at both window sizes. Single split, not fold-validated.
+
+**Combined: h=128 + temporal variation, N=50.** The two levers stacked, expecting either a small further gain (matching the "capacity still has room" read above) or at worst a wash.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU, h=128, N=50 (no temporal) | 0.944 | 0.833 | 0.877 | 0.875 | 0.907 | **0.887** |
+| GRU, h=64, N=50 + temporal variation | 0.952 | 0.790 | 0.884 | 0.871 | 0.899 | 0.883 |
+| GRU, h=128, N=50 + temporal variation | 0.937 | 0.795 | 0.882 | 0.867 | 0.902 | 0.880 |
+
+Not a wash, a real regression: adding the temporal scalar to h=128 costs -0.0076 versus h=128 alone, the opposite direction of what it did to h=64 (+0.008). This is a genuine surprise against the prediction, not a case of "the two gains don't stack," the combination is worse than the better of the two ingredients alone. Reads as the larger GRU already implicitly learning whatever the temporal scalar was supplying, to the point that the scalar's two extra input dimensions are now pure added capacity for the MLP head to overfit against, without new information behind them, a sharper version of the same overlap story the linear probe found for the pooled embedding. car and large_vehicle both drop noticeably (-0.007, -0.038) relative to h=128 alone, driving the net regression. Single split, not fold-validated. Best config at N=50 remains GRU h=128 alone, no temporal, at 0.887.
+
+E (Transformer d=32, plain, N=50) completed:
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Transformer, d=32, N=10 (no temporal) | 0.917 | 0.785 | 0.826 | 0.839 | 0.861 | 0.846 |
+| Transformer, d=32, N=50 (no temporal) | 0.938 | 0.822 | 0.851 | 0.863 | 0.889 | **0.8727** |
+| GRU, h=64, N=50 (no temporal) | 0.937 | 0.804 | 0.870 | 0.870 | 0.894 | 0.875 |
+
+Transformer gains almost exactly as much from N=10 to N=50 as the GRU does (+0.027 vs +0.028), unlike the N=10 capacity ablation where the Transformer clearly hit a ceiling the GRU didn't. Window size, not architecture capacity, looks like the shared lever here, both recurrence and attention benefit about equally from more real time per track. Still trails the GRU by about the same margin at N=50 (0.873 vs 0.875) as the gap already seen at N=10 and in the capacity ablation. Single split, not fold-validated.
+
+**Temporal variation scalar added, N=50:**
+
+| config | macro F1 |
+|---|---|
+| Transformer, d=32, N=50 (no temporal) | 0.8727 |
+| Transformer, d=32, N=50 + temporal variation | 0.8734 |
+
+Flat (+0.0007), same as N=10 (-0.001). Consistent story across both window sizes: the Transformer's attention pooling doesn't pick up anything extra from the explicit scalar, unlike the GRU where it helps at h=64 but hurts at h=128. Single split, not fold-validated.
+
+### Isolating cross-sensor handoff from temporal variation, at N=50
+
+Every all-sensor result so far bundled the cross-sensor handoff with the temporal variation scalar in one run. Ran the same all-sensor N=50 histogram MLP pipeline with the scalar removed, to see how much of 0.881 is the handoff itself versus the added feature.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Pooled control, N=50, sensor2-only | 0.918 | 0.768 | 0.837 | 0.882 | 0.887 | 0.858 |
+| Pooled control, N=50, all-sensor (no temporal) | 0.953 | 0.783 | 0.788 | 0.903 | 0.904 | 0.879 |
+| Pooled + temporal variation, N=50, all-sensor (delta_t corrected) | 0.940 | 0.814 | 0.853 | 0.905 | 0.894 | **0.881** |
+
+Cross-sensor handoff alone accounts for +0.021 over sensor2-only (0.858 to 0.879), the temporal scalar then adds only +0.002 more on top (0.879 to 0.881). Handoff is clearly the dominant lever of the two, the scalar's marginal contribution keeps shrinking as more real signal (bigger N, more sensors) gets added elsewhere, same pattern already seen in the GRU line. two_wheeler is notably worse under handoff-alone (0.788) than either sensor2-only (0.837) or handoff+temporal (0.853), the temporal scalar recovers most of that class's loss rather than adding fresh gain uniformly across classes. Single split, not fold-validated.
+
+**Same isolation at N=20:**
+
+| config | macro F1 |
+|---|---|
+| Pooled control, N=20, sensor2-only | 0.852 |
+| Pooled control, N=20, all-sensor (no temporal) | 0.8685 |
+| Pooled + temporal variation, N=20, all-sensor (delta_t corrected) | 0.866 |
+
+Handoff alone is +0.0165 over sensor2-only, consistent with N=50's pattern. But the temporal scalar now comes in *below* the no-temporal control (-0.0025), not just diminishing, an actual (if small) regression. Same direction as the GRU h=128+temporal result: once enough real signal is already present (here, cross-sensor handoff; there, GRU capacity), the temporal scalar stops being neutral-at-worst and starts costing a little, not just contributing less. Single split, not fold-validated, and the gap is well within the kind of oscillation flagged in the no-early-stopping caveat above, worth a fold check before reading too much into the sign.
+
+### The same OOM bug, a third time: the GRU/Transformer embedding-sequence pipeline at all-sensor N=50
+
+Summary:
+
+- **What triggered it:** launching GRU/Transformer/temporal/fusion at all-sensor N=50 for the first time ever.
+- **How I found it:** reading the launcher's `Killed` lines, noting all four job logs were completely empty (no traceback, not even the pipeline's own first print statement), and cross-checking `dmesg`, which confirmed a real kernel OOM-kill at ~12.37GB anon-rss.
+- **Root cause:** `pad_sequences`, called from `prepare_windowed_embedding_splits` and separately from `compute_gru_hidden_states`, was building dense `(n, m_max, dim)` arrays for train/val/test all at once, the same disease as the point-set bug documented earlier, just never triggered at sensor2 scale (real numbers derived from the cached embeddings: 5.58GB/1.11GB/1.14GB dense vs. sensor2's ~2.2GB, which explains why every prior sensor2 GRU/Transformer run was silently fine).
+- **The fix:** the same ragged/per-batch discipline already proven for DeepReflecs, applied across `train_gru`, `train_transformer`, `_train_sequence_with_temporal`, all three `_predict_*_in_batches` functions, and `compute_gru_hidden_states`.
+- **A second, smaller find:** the temporal-variant alignment check was rebuilding a whole raw point-set just to discard it and keep only labels, replaced with a cheap label-only helper.
+- **My own bug along the way:** a nested-quote escaping mistake broke an f-string in the relaunch command, fixed by writing real `.py` script files instead of inline `python3 -c` strings.
+
+Launched the DeepReflecs baseline, GRU h=64/h=128 (no temporal and +temporal), Transformer d=32, and fusion, all at all-sensor N=50, none of which had ever touched all-sensor data before. Before launching, derived (not guessed) the risk: all-sensor N=50 has roughly 2.56x sensor2's window count (test-split support sums, 178,765 vs 69,723), so proactively fixed the whole-array-to-GPU pattern already known from the point-set bug above in `train_gru`, `train_transformer`, `_train_sequence_with_temporal`, and their eval counterparts, batching the GPU transfer per mini-batch instead of moving the whole split at once. Smoke-tested on a 3-sequence subset, everything passed, launched the full queue.
+
+**Found by reading the job logs and cross-checking dmesg.** The point-set baseline (job 1) finished cleanly: macro F1 0.8755 (car 0.937, large_vehicle 0.836, two_wheeler 0.823, pedestrian 0.903, pedestrian_group 0.878), better than either all-sensor MLP pooled variant. But the launcher's own shell output showed `Killed` for all four remaining jobs (GRU h=64, GRU h=128, GRU h=128+temporal, Transformer), and each job's own log file was completely empty, no traceback, no print output at all, not even the `N=50 stride=1: windows train=... val=... test=...` line that `prepare_windowed_embedding_splits` prints. An empty log with nothing printed before a function's own status line is the same signature as the point-set OOM above: the process died before Python ever got control back, meaning it was killed from outside, not by a caught exception. `dmesg` confirmed it directly: `Out of memory: Killed process ... (python3) total-vm:58353656kB, anon-rss:12372984kB`, a real kernel OOM-kill, on the same 12GB machine, at essentially the same ~12.37GB resident size as the point-set crash.
+
+**Root cause: the identical whole-split dense-padding pattern, recurring in a third location.** The GPU-transfer fix applied before launch addressed the point-set bug's *second* mechanism (a redundant full-size copy sitting on the GPU) but never touched its *first* mechanism (the CPU-side dense array itself), because that mechanism doesn't live in `train_gru`/`train_transformer` at all, it lives one call earlier, in `pad_sequences` (called from `prepare_windowed_embedding_splits`, `deepreflecs_rnn_track_accumulation.py`, and also independently from `compute_gru_hidden_states` in the fusion section). `pad_sequences` builds `X = np.zeros((n, m_max, dim))` for train, val, and test in one call each, all three kept alive simultaneously in the same function before ever returning. Unlike the point-set bug, `m_max` here is bounded at the window size (n=50, since a sequence is never longer than the window itself), so the failure mode isn't one outlier window blowing up the shared max, it's just that every split's dense array is genuinely large at this window count and window volume, with no ragged/per-batch discipline applied to any of it.
+
+Derived the actual numbers directly from the already-cached all-sensor scan embeddings before writing any fix, rather than continuing to guess: `build_windowed_embedding_sequences` on the real train/val/test splits gives `train: n=871367 m_max=50 dim=32`, `val: n=173781`, `test: n=178765`. Dense-array cost: train alone 5.58GB, val 1.11GB, test 1.14GB, 7.83GB total, all three alive at once inside `prepare_windowed_embedding_splits`, on top of the ragged source lists that built them (also still in scope) and the cached embeddings dataframe. Comfortably explains the observed ~12.37GB kill. This never showed up at sensor2 scale because sensor2's train split there is roughly 2.56x smaller, about 2.2GB dense, well under the 12GB ceiling even with val/test and everything else added on top, so the bug was latent in every sensor2 GRU/Transformer/temporal run this branch has ever done, it simply never had enough scale to trigger.
+
+**Fix: the same ragged, per-batch discipline already proven for the point-set trainer, applied to the embedding-sequence pipeline.** `prepare_windowed_embedding_splits` now returns ragged `list[np.ndarray]` sequences directly, no padding and no `m_max` computed at all at that stage. `pad_sequences` is still used, but only ever called inside a batch loop now, on that batch's own max length: `_predict_in_batches`, `_predict_transformer_in_batches`, `_predict_with_temporal_in_batches`, `train_gru`, `train_transformer`, `_train_sequence_with_temporal`, and `compute_gru_hidden_states` (the fusion section's GRU-hidden-state extractor, which had the identical bug plus pushed the whole padded array straight onto the GPU in one shot, an even more direct version of the same mistake) were all rewritten to pad and move to DEVICE per mini-batch, matching the pattern already established for `train_deepreflecs_ragged`/`_predict_in_batches_ragged`. `DeepReflecsTransformer`'s positional-embedding table size (`max_seq_len`) now takes the window size `n` directly as a parameter instead of being read off a padded array's shape, since that array no longer exists at prepare-time.
+
+**A second, smaller waste found in the same pass: rebuilding a whole point-set just to throw it away.** `compute_temporal_variation_for_split`'s own alignment check (verifying the temporal-scalar branch and the embedding-sequence branch iterate windows in the same order, real discipline, not paranoia, see the design note above) called `build_windowed_point_sets` (the raw N-scan point-pooling function, aliased `build_pooled_point_sets`) purely to get a `y_check` label array, then discarded the point sets it returned. At all-sensor N=50 scale that rebuilds the exact same large pooled-point-set structure that caused today's *first* OOM, just to compute something that only needs per-window labels. Replaced it with a new `_build_windowed_labels` helper that mirrors the same windowing/sort logic without touching point features at all, keeping the alignment check but at negligible memory cost.
+
+Smoke-tested all three rewritten pipelines (GRU, Transformer, GRU+temporal with the new label check) on a 3-sequence subset, all passed, then relaunched jobs 2 through 6 for real, this time with each job as its own script file rather than an inline `python3 -c` string (an unrelated bug of my own, a nested-quote escaping mistake in the first relaunch attempt, broke an f-string and killed job 2 before it ever touched any data; writing real `.py` files avoided the whole class of shell-quoting error rather than debugging it further).
+
+### GRU/Transformer/fusion family, all-sensor N=50: the branch's best results
+
+All six jobs finished clean after the ragged fix, no further OOM on any of them. This is the first time the GRU/Transformer/fusion family has ever run on all-sensor data, closing the last major gap in the branch: cross-sensor handoff had only ever been combined with the pooled histogram MLP before now.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 (all-sensor) | macro F1 (sensor2, N=50, reference) |
+|---|---|---|---|---|---|---|---|
+| Fusion (pooled + GRU h=64) | 0.953 | 0.866 | 0.878 | 0.901 | 0.905 | **0.9005** | 0.877 |
+| GRU h=64 (no temporal) | 0.950 | 0.856 | 0.866 | 0.898 | 0.915 | 0.8988 | 0.8748 |
+| GRU h=128 (no temporal) | 0.950 | 0.874 | 0.869 | 0.895 | 0.886 | 0.8930 | 0.8874 |
+| GRU h=128 + temporal variation | 0.950 | 0.843 | 0.892 | 0.879 | 0.892 | 0.8914 | 0.880 |
+| Transformer d=32 (plain) | 0.943 | 0.827 | 0.882 | 0.904 | 0.901 | 0.8914 | 0.8727 |
+| Pooled + temporal variation (MLP, reference) | 0.940 | 0.814 | 0.853 | 0.905 | 0.894 | 0.881 | 0.867 |
+| Pooled control, no temporal (MLP, reference) | 0.953 | 0.783 | 0.788 | 0.903 | 0.904 | 0.879 | 0.858 |
+| DeepReflecs point-set baseline | 0.937 | 0.836 | 0.823 | 0.903 | 0.878 | 0.8755 | 0.8527 |
+
+New branch-best at the time: **fusion (pooled + GRU h=64), all-sensor, N=50, 0.9005**, the first result over 0.90, and the first fusion attempt to actually beat its own GRU branch by a real (if still small) margin, +0.0017, matching almost exactly the same +0.0017 fusion gave at sensor2 N=50. Every GRU/Transformer variant here beats every one of this branch's sensor2-only results at any N, and beats both existing all-sensor MLP baselines too: cross-sensor handoff, already shown to help the pooled MLP line (+0.021 at N=50, see the isolation section above), generalizes cleanly to the whole embedding-sequence family. Later beaten by swapping the pooled branch's encoder for the histogram MLP's own hidden layer instead of DeepReflecs, see below.
+
+Two reversals from the sensor2-only pattern, both consistent with a theme already seen elsewhere in this branch (temporal variation's marginal contribution shrinking as more real signal gets added):
+
+- **Capacity flips.** At sensor2 scale, h=128 (0.8874) clearly beat h=64 (0.8748). At all-sensor scale the order reverses: h=64 (0.8988) beats h=128 (0.8930), by a real margin (-0.0058). With more real cross-sensor signal already in the input, the extra width looks like it's now costing more in overfitting risk than it buys in expressiveness, same shape as the temporal scalar's shrinking/negative marginal value once the GRU or the input already carries more of the same information.
+- **Temporal variation stays flat-to-negative.** GRU h=128+temporal (0.8914) comes in below GRU h=128 alone (0.8930), a small real regression (-0.0016), same direction (though smaller magnitude) as the sensor2 h=128 result (-0.0076) and the all-sensor N=20 pooled-MLP result (-0.0025). Three independent confirmations now, at three different N/sensor-scope combinations, that once enough real signal is already present the temporal scalar stops being neutral and starts costing a little.
+
+All single split, not fold-validated, the standing caveat for every result in this branch.
+
+### GRU/Transformer/fusion family, all-sensor N=20: filling the gap between N=10 and N=50
+
+The GRU/Transformer/fusion family had jumped straight from sensor2-only N=10 to all-sensor N=50 (above), skipping N=20 entirely, the only N where the pooled MLP line's own handoff-vs-temporal isolation was ever run. Filled it in for direct comparison. Fusion needed two prerequisites that didn't exist yet at this N/sensor combination: an all-sensor N=20 pooled point-set encoder and an all-sensor N=20 GRU h=64 checkpoint, both trained first, neither separately requested.
+
+All six jobs used the same ragged/per-batch pipeline already fixed for N=50; window count at N=20 is identical to N=50 (windowing is per-scan-position, independent of N, only the per-window content differs), so this ran at a smaller effective scale than the already-proven N=50 jobs. No OOM on any of them.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 (N=20) | macro F1 (N=50, reference) |
+|---|---|---|---|---|---|---|---|
+| Fusion (pooled + GRU h=64) | 0.953 | 0.827 | 0.877 | 0.901 | 0.900 | **0.8897** | 0.9005 |
+| GRU h=64 (no temporal) | 0.944 | 0.829 | 0.875 | 0.900 | 0.900 | 0.8895 | 0.8988 |
+| GRU h=128 (no temporal) | 0.943 | 0.829 | 0.868 | 0.896 | 0.896 | 0.8867 | 0.8930 |
+| GRU h=128 + temporal variation | 0.940 | 0.819 | 0.878 | 0.890 | 0.894 | 0.8844 | 0.8914 |
+| Transformer d=32 (plain) | 0.937 | 0.819 | 0.867 | 0.899 | 0.888 | 0.8820 | 0.8914 |
+| DeepReflecs point-set baseline | 0.933 | 0.817 | 0.813 | 0.890 | 0.864 | 0.8635 | 0.8755 |
+
+Every variant is weaker at N=20 than at N=50, expected, less real time per window. But the *shape* of the family's own N=50 findings holds up cleanly at N=20 too, two more confirmations rather than new surprises:
+
+- **Fusion still doesn't really win.** +0.0002 over GRU alone, smaller even than N=50's already-noise-level +0.0017. By this branch's own repeated standard for what counts as a real gain (established across a dozen single-split comparisons in this doc), this is indistinguishable from zero. Fusion has now failed to clear its own GRU branch by a real margin at N=10, N=20, or N=50, sensor2 or all-sensor. The mechanism itself doesn't reliably add anything; getting the two-branch pipeline correctly aligned and trained is the only part of "fusion" that's actually been worth doing.
+- **Capacity reversal repeats.** h=64 (0.8895) beats h=128 (0.8867) again, same direction as the N=50 reversal (-0.0058 there, -0.0028 here). Not a fluke of one N.
+- **Temporal variation regression repeats.** GRU h=128+temporal (0.8844) comes in below h=128 alone (0.8867), -0.0023, same direction as every other temporal-variation test at scale (N=50 sensor2: -0.0076; N=50 all-sensor: -0.0016; N=20 all-sensor MLP: -0.0025). Four independent confirmations now.
+
+All single split, not fold-validated.
+
+### Fusion, MLP branch: does the gain come from the learned embedding or the histogram itself?
+
+All-sensor N=50, GRU h=64 branch held fixed throughout, only the pooled branch's encoder changes.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Fusion (frozen MLP embedding + GRU h=64) | 0.952 | 0.854 | 0.894 | 0.908 | 0.916 | **0.9048** |
+| Fusion (pooled DeepReflecs + GRU h=64, reference) | 0.953 | 0.866 | 0.878 | 0.901 | 0.905 | 0.9005 |
+| Fusion (raw quantile-bin histogram, no MLP + GRU h=64) | 0.953 | 0.852 | 0.885 | 0.902 | 0.909 | 0.9004 |
+| GRU h=64 alone (reference) | 0.950 | 0.856 | 0.866 | 0.898 | 0.915 | 0.8988 |
+
+Swapped the fusion's pooled branch from the DeepReflecs point-set encoder to the already-trained histogram MLP's own penultimate hidden-layer activation (`MLP.forward_features`, new this session, the MLP-line analogue of DeepReflecs' `point_dim` output). Everything else, the GRU branch and the fusion-head mechanism, stayed identical to every other fusion variant in this branch. New branch-best, the first result to clear a real (not noise-band) margin over GRU alone: +0.006, more than 3x the DeepReflecs-pooled fusion's own +0.0017.
+
+Before trusting that number, ran the control this branch's own "demand mechanism, not fit" standard requires: the same pooled branch but using the raw 80-dim quantile-bin histogram vector directly, no MLP model at all. That control lands at 0.9004, statistically indistinguishable from GRU alone (0.8988) and the DeepReflecs-pooled fusion (0.9005), and 0.0044 below the MLP-embedding version. This cleanly falsifies the alternative explanation (that the histogram encoding's distributional properties, not the MLP's learned representation, were doing the work): the gain is specific to the MLP's *learned* hidden layer. This directly contradicted my own prediction going in, made before either result landed, that this experiment would likely not beat the DeepReflecs-fusion result.
+
+All single split, not fold-validated.
+
+### The same OOM bug, a fourth time: transient point-set retention in the fusion family
+
+Summary:
+
+- **What triggered it:** launching the end-to-end MLP-fusion warmstart/random-init jobs at all-sensor N=50, right after the frozen-MLP-fusion and raw-histogram-fusion variants above had both already finished clean at the identical scale.
+- **How I found it:** both jobs produced completely empty logs again, but this time reading the code turned up nothing, `prepare_fusion_splits_mlp_e2e` and everything it calls is structurally identical to the raw-histogram-fusion path that had just succeeded. Resolved it empirically instead: instrumented a rerun with `resource.getrusage().ru_maxrss` checkpoints at every pipeline stage, plus a background watcher polling `ps` RSS and `dmesg` every 10 seconds, and watched it live.
+- **Root cause:** `prepare_fusion_splits_mlp_e2e` (and its siblings `prepare_fusion_splits_histogram`, `prepare_fusion_splits_mlp`) build a full ragged `train_point_sets` structure just to fit quantile edges, then leave that name bound for the rest of the function, so it stays resident through the whole train/val/test loop, including while the train split's point sets get rebuilt a second time for the real histogram features. At all-sensor N=50 scale that is roughly 8GB of pure transient overhead sitting on top of a ~1.5GB final payload.
+- **The fix:** `del train_df, train_point_sets` immediately after edge-fitting, before the per-split loop starts, applied to all three affected functions.
+- **A second, smaller find:** the epoch-progress `print` inside `train_fusion_mlp_e2e` had no `flush=True`, unlike this file's own convention everywhere else; a crash mid-training discards every buffered epoch line, which is the actual reason the two original failed runs' logs were completely empty rather than showing partial progress, not proof the crash happened at process start.
+
+Live-watched peak RSS climb from 2.9GB (after loading the all-sensor points table and cached scan embeddings, a genuinely large but known baseline) to 10.9GB inside the single `prepare_fusion_splits_mlp_e2e` call, on a 12GB-total machine, via the `ru_maxrss` checkpoints. That is a margin thin enough to flip between "barely survives" and "OOM-killed" depending on ambient memory state at the moment, which is exactly why an unpatched rerun of the identical job survived (`dmesg` showed `WSL2: Performing memory compaction` repeatedly while RSS briefly plateaued near the ceiling) while the two original attempts had already been killed outright, anon-rss 6.49GB confirmed via `dmesg` for one of them. Same code, different luck, not a deterministic crash.
+
+Confirmed the fix works rather than assuming it: reran the same job on the patched code and peak RSS dropped from 10.883GB to 8.05-8.08GB, a real ~2.8GB reduction, both warmstart and random-init completed cleanly afterward with roughly 4GB of headroom instead of ~1GB, and both reproduced numerically consistent results against the earlier unpatched run (warmstart 0.9014 both times).
+
+### End-to-end MLP-fusion: fine-tuning the histogram encoder during training
+
+All-sensor N=50, same GRU h=64 branch, same fusion head. The MLP encoder becomes a trainable sub-module (gradients flow back through `forward_features`) instead of a frozen precompute step.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| Fusion (frozen MLP embedding, reference) | 0.952 | 0.854 | 0.894 | 0.908 | 0.916 | 0.9048 |
+| Fusion, MLP end-to-end (warmstart) | 0.953 | 0.855 | 0.889 | 0.899 | 0.911 | 0.9014 |
+| Fusion, MLP end-to-end (random-init) | 0.952 | 0.853 | 0.888 | 0.900 | 0.907 | 0.9001 |
+
+Both variants land below the frozen embedding: warmstart -0.0034, random-init -0.0047. Unfreezing and fine-tuning the encoder that was already winning, rather than leaving it frozen, made things slightly worse, not better, the opposite of what the GRU-encoder end-to-end line found at N=10 sensor2 (warmstart 0.853 beat frozen 0.847 there). Warmstart still beats random-init by a small margin (+0.0013), same direction as the GRU-encoder line, but neither end-to-end variant clears the frozen baseline this time. Read together with the raw-histogram control above: the frozen MLP hidden layer already sits at whatever this feature set's ceiling is for this task, and further fine-tuning it inside the fusion objective mostly trades a little bit of the pretrained single-scan representation for overfitting risk, rather than finding anything new.
+
+All single split, not fold-validated.
+
+### GRU depth ablation: 3 layers vs. 1, at N=20 all-sensor
+
+Same question already asked of hidden_size (64 vs. 128, both reversing sensor2's ordering at all-sensor scale), asked of depth instead: `num_layers` 1 to 3, hidden_size and everything else held fixed. Needed threading `gru_num_layers` through `prepare_fusion_splits`/`run_fusion_training` first (previously hardcoded to `GRU_LAYERS=1` regardless of the loaded checkpoint's real depth, a latent bug that happened to never matter because no deeper GRU had been trained yet). Smoke-tested the new parameter on a 3-sequence subset before the real run, confirmed the 3-layer checkpoint loads back correctly inside the fusion pipeline.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 | 1-layer reference |
+|---|---|---|---|---|---|---|---|
+| GRU h=64, 3 layers | 0.941 | 0.828 | 0.875 | 0.895 | 0.893 | 0.8862 | 0.8895 |
+| Fusion (pooled + GRU h=64), 3 layers | 0.944 | 0.833 | 0.876 | 0.896 | 0.896 | 0.8892 | 0.8897 |
+
+Depth costs a little rather than helping, same direction as the width ablation: GRU alone drops -0.0033 going from 1 to 3 layers, fusion drops -0.0005 (small enough to be noise on its own, but still not an improvement). Train accuracy for the 3-layer GRU keeps climbing past epoch 40 (0.92 to 0.94+) while val_acc plateaus around 0.89-0.90 the whole time, the same overfitting shape already seen in the hidden_size ablation, not a new failure mode. Third independent confirmation now (width at h=128, depth at 3 layers, both at all-sensor N=20/50) that this GRU line isn't capacity-starved once cross-sensor handoff is already in the input; added parameters buy overfitting risk, not expressiveness.
+
+All single split, not fold-validated.
+
+### Point-level attention over the whole track: the most expensive option, and the worst result
+
+Every fusion variant tried so far glues two separately-trained branches together after the
+fact: an order-blind pooled encoder (DeepReflecs max-pool or a histogram MLP, neither of
+which ever sees more than one scan's points at a time before pooling) and an order-aware
+GRU running over per-scan embeddings. The motivating diagnosis: pooling collapses each
+scan's points before the GRU ever sees them, so cross-frame point information gets
+discarded before either branch can use it. Point-level attention tests that diagnosis
+directly: every point across all N pooled scans becomes one token, tagged with its own
+recency (0 = target scan, up to N-1 = oldest), and one self-attention encoder jointly
+learns what to attend to and how recent each point is, instead of splitting those two jobs
+across two frozen networks. New module, `deepreflecs_point_attention_track_accumulation.py`
+(`PointAttentionClassifier`: per-point linear embedding + a learned recency embedding,
+mirroring `DeepReflecsTransformer`'s per-scan positional embedding but at point
+granularity, `nn.TransformerEncoder`, masked max-pool into one classification vector,
+matching DeepReflecs' own aggregation convention).
+
+Before building it, three whiteboard topics were raised and one was pursued for real
+before committing GPU time: every fusion variant tried at all-sensor N=50 lands inside a
+0.006 macro F1 band around GRU alone (0.8988 to 0.9048), weak evidence that cross-frame
+point information is actually where the remaining error lives rather than a validated
+mechanism. Built anyway, since a cheap ablation to disambiguate first (per-point recency
+as a plain feature, no attention) was judged not necessary to run given the more direct
+test was already planned.
+
+Real numbers derived before choosing the one consequential design parameter, the point
+cap bounding attention's O(M^2) cost: point-count-per-window at all-sensor N=20 is
+heavy-tailed (median 46, p99 269, p99.9 498, max 692). Capped at 300 (keeps p99 fully
+intact, randomly subsamples only the top ~0.7% of windows). A 30-batch timing test before
+the real run showed most batches pad close to the cap anyway (heavy tail pulling up the
+batch max even at batch_size=128), giving ~2.7 min/epoch, ~5 hours for 100 epochs.
+Smoke-tested on a 3-sequence subset first.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU h=64 (reference) | 0.944 | 0.829 | 0.875 | 0.900 | 0.900 | 0.8895 |
+| Fusion, pooled + GRU h=64 (reference) | 0.953 | 0.827 | 0.877 | 0.901 | 0.900 | 0.8897 |
+| Point-attention | 0.944 | 0.837 | 0.856 | 0.901 | 0.885 | **0.8847** |
+
+Worst N=20 all-sensor result of the entire GRU/fusion family, below even the depth
+ablation's 3-layer GRU (0.8862). large_vehicle improves a little (+0.008 over GRU alone),
+but two_wheeler (-0.019) and pedestrian_group (-0.015) both regress and outweigh it. Five
+hours of GPU time and the largest architectural departure in this branch did not recover
+anything the frozen two-branch fusion mechanism was missing, it lost ground.
+
+This is a real answer to the whiteboard question, not a null result to explain away: the
+diagnosis motivating point-attention (cross-frame point information is being discarded,
+and that's costing real accuracy) predicted a jointly-learned mechanism should beat the
+split frozen branches by more than the noise-level margins every other fusion variant has
+shown. It didn't. The more parsimonious reading, consistent with every fusion result in
+this branch landing inside a few thousandths of GRU alone regardless of mechanism, is that
+cross-frame point aggregation isn't where this task's remaining error lives, not that the
+mechanism needed to be more expensive or more unified to find it. Single run, no seed
+variance checked, but the direction (worse, not better) doesn't need that scrutiny the way
+a claimed new-best would: an unlucky seed could turn a small real gain into a wash, it
+would need real luck to turn a real gain into the branch's worst result.
+
+All single split, not fold-validated.
+
+### Mamba: a selective state-space model, and a numerical instability in the naive vectorized scan
+
+New module, `deepreflecs_mamba_track_accumulation.py`: same frozen per-scan embeddings and
+windowing as the GRU/Transformer, sequence-mixing layer swapped for a selective SSM (S6).
+Motivation: a real deployment classifies every incoming scan in real time under an
+automotive SoC's memory budget. A GRU already fits that (O(1) state per update); a
+Transformer needs an explicit KV cache to match it. Mamba is a third option with the same
+O(1)-streaming property as a GRU, but the state update (what to remember or forget) is
+input-dependent per channel, not one shared gate.
+
+The official `mamba-ssm` package needs compiled CUDA kernels for its parallel associative
+scan, built for sequences thousands of steps long. Every sequence here is at most
+WINDOW_N=20 steps, so a naive sequential Python loop over time seemed like it should
+already be fast enough, no custom kernel needed. First timing test proved that assumption
+wrong: 273ms/batch at batch_size=128, an estimated 51.7 hours for 100 epochs, roughly 10x
+the already-expensive point-attention run despite doing far less actual compute. The loop
+itself is cheap in FLOPs; the cost is Python-level GPU kernel-launch overhead, 20 separate
+small launches per batch instead of one, exactly why the real mamba-ssm package ships a
+custom kernel in the first place.
+
+Tried to fix this by vectorizing the linear recurrence via a closed-form cumulative-sum
+formulation in log-space instead of the loop. It trained fast, and it was wrong:
+
+> Real numerical failure, exactly the known instability with that naive log-space trick:
+> `exp(-log_a_cum)` overflows once the cumulative decay gets large enough (state matrix
+> entries go up to -16, dt can be >1, so 20 steps of decay easily exceeds float32's exp
+> range), producing NaN loss and a collapsed model. That formulation needs a proper
+> chunked associative-scan combine rule to be stable, which is real complexity for a short
+> sequence that doesn't need it. Reverting to the correct sequential loop and instead
+> fixing the actual bottleneck: batch size. Mamba's per-sample memory footprint is tiny
+> compared to the point-attention model, so a much bigger batch amortizes the fixed
+> per-step kernel-launch overhead over far more data per launch.
+
+Reverted to the sequential loop (numerically exact, already validated correct in the first
+smoke test) and raised `BATCH_SIZE` from the branch's usual 128 to 2048: the fixed
+per-step launch cost is paid once per batch regardless of batch size, and Mamba's
+per-sample footprint (T<=20, d_inner=64, d_state=16) is small enough to afford a much
+larger batch than the point-set/attention lines ever could. Re-timed at 340ms/batch but
+only 426 batches/epoch at the larger batch size, ~4.0h estimated for 100 epochs; ran
+faster in practice, ~1.08 min/epoch, full 100-epoch job finished in under 2 hours.
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU h=64 (reference) | 0.944 | 0.829 | 0.875 | 0.900 | 0.900 | 0.8895 |
+| Fusion, pooled + GRU h=64 (reference) | 0.953 | 0.827 | 0.877 | 0.901 | 0.900 | 0.8897 |
+| Point-attention (reference) | 0.944 | 0.837 | 0.856 | 0.901 | 0.885 | 0.8847 |
+| Mamba | 0.939 | 0.825 | 0.858 | 0.899 | 0.887 | **0.8816** |
+
+Worst N=20 all-sensor result of the whole family, below point-attention (-0.0031) and
+well below GRU alone (-0.0079). This despite val_acc during training peaking around
+0.892 to 0.893, higher than the GRU/fusion references ever reached mid-training; the
+final epoch's val_acc (0.8884) and the test-set macro F1 (0.8816) both land below what
+the training curve seemed to promise, val_acc alone was a poor predictor of the final
+ranking here.
+
+No single class stands out as the failure; every class is at or slightly below its GRU
+or point-attention reference, a broad small regression rather than one collapsed class.
+Input-dependent per-channel gating (the entire motivation for trying Mamba over a plain
+GRU) did not translate into better classification here, at T<=20 the extra expressivity
+looks like it costs more in optimization difficulty (2048-batch, low learning rate,
+100 epochs to converge) than it returns in accuracy. Combined with point-attention, this
+is now two architecturally more expensive, more expressive replacements for the plain
+GRU that both underperformed it; the pattern points at the ceiling being somewhere other
+than sequence-mixing architecture, not at needing a third one.
+
+Single run, no seed variance checked, all single split, not fold-validated.
+
+### Histogram-MLP embedding fed into the GRU's own recurrence, N=20 all-sensor
+
+Every GRU/Transformer/Mamba variant above shares the same per-scan input: DeepReflecs'
+frozen point-set embedding. The one place a different encoder (the histogram MLP's own
+hidden layer) ever helped was the frozen-MLP-embedding fusion result (0.9048, N=50), but
+there it only ever sat in the pooled, order-blind branch, glued on after the fact. Never
+tested: feeding that same MLP embedding into the GRU's recurrence directly, at every
+timestep, instead of DeepReflecs. New per-scan (N=1) histogram-MLP encoder trained for
+this (`mlp_track_accumulation.run_windowed_mlp(n=1)`, all-sensor, same 5 features/
+range_sc_mode="raw"/n_bins=16/no doppler spread convention as every other MLP model in
+this branch; own single-scan test macro F1 0.7207, the weak baseline expected with no
+temporal information at all). New function `compute_scan_embeddings_mlp` (mirrors
+`compute_scan_embeddings`, swaps the encoder) produces one MLP-forward_features vector
+per scan, cached, then reused unchanged by every existing GRU/fusion function (they only
+ever consume `e0..eN` columns, never care which encoder produced them).
+
+| config | car | large_vehicle | two_wheeler | pedestrian | pedestrian_group | macro F1 |
+|---|---|---|---|---|---|---|
+| GRU h=64, DeepReflecs embeddings (reference) | 0.944 | 0.829 | 0.875 | 0.900 | 0.900 | 0.8895 |
+| GRU h=64, MLP-histogram embeddings | 0.937 | 0.791 | 0.846 | 0.899 | 0.884 | **0.8713** |
+
+Worst N=20 all-sensor result of the whole family, well below every architecture change
+tried on top of DeepReflecs embeddings (point-attention 0.8847, Mamba 0.8816) and -0.0182
+below the GRU-on-DeepReflecs reference, not a small gap. large_vehicle takes the biggest
+hit (-0.038). The frozen-MLP-embedding fusion's win doesn't transfer to "feed the same
+embedding through a recurrence instead": DeepReflecs' point-set encoder produces a better
+per-scan representation for the GRU's own sequence-mixing to work with than the histogram
+MLP's does, even though the histogram MLP embedding helped when used the other way (as a
+static, order-blind pooled summary sitting beside a DeepReflecs-based GRU rather than
+inside one). Which encoder wins depends on the role it's asked to play, not on which one
+is "better" in the abstract.
+
+Fusion on top of this (pooled N=20 all-sensor histogram-MLP branch + this new MLP-
+embedding GRU's hidden state) still running; result to follow.
+
 ## TLDR-Comparison
 
 Every variant tried in this branch, one row each, sorted by macro F1 descending. Smoothing variants excluded (post-hoc, not a distinct architecture/feature). "What was done" is the method itself, "Motivation" is why it was tried, "Result" is the outcome. Single-split numbers unless a fold mean/std is noted.
@@ -590,10 +1002,40 @@ Every variant tried in this branch, one row each, sorted by macro F1 descending.
 
 | Variant | What was done | N | Model | Sensor | Macro F1 | Motivation | Result |
 |---|---|---|---|---|---|---|---|
-| GRU h=64 + temporal variation | Concatenated the two temporal-variation scalars onto the GRU's final hidden state, pushed to N=50 instead of N=10 | 50 | DeepReflecs | sensor2 | **0.883** | Line had never been pushed past N=10, test if it scales with window size like the pooled MLP did | New overall best; uneven per-class (two_wheeler/pedestrian_group up hard, large_vehicle down); train/val gap still widening at epoch 100, not fully converged |
-| Pooled + temporal variation, delta_t corrected | Histogram MLP trained on all-4-sensor windowed point sets (N=50) plus elapsed-time-normalized temporal variation scalars | 50 | MLP | all-sensor | 0.881 | Combine both known levers (bigger N, cross-sensor handoff) in one run | Axes stack rather than cancel, clears both individual bests; was overall best until GRU N=50 above |
+| Fusion (frozen MLP embedding + GRU h=64) | Swapped the fusion's pooled branch from the DeepReflecs point-set encoder to the histogram MLP's own penultimate hidden-layer activation (`forward_features`), same GRU h=64 branch and fusion head | 50 | MLP | all-sensor | **0.9048** | Test whether a different pooled-branch encoder changes fusion's marginal gain over GRU alone | New overall best; +0.006 over GRU alone, 3x the DeepReflecs-pooled fusion's own gain; raw-histogram control (0.9004, below) proves the gain is specific to the MLP's learned hidden layer |
+| Fusion, MLP end-to-end (warmstart) | Unfroze the histogram-MLP encoder inside the fusion head, backpropagating through it every batch instead of using it as a frozen precompute step; encoder initialized from the pretrained checkpoint | 50 | MLP | all-sensor | 0.9014 | Check if fine-tuning the winning frozen-MLP-fusion's encoder further adds anything on top | Below the frozen version (-0.0034); fine-tuning made it worse, not better, opposite direction from the GRU-encoder end-to-end line's own warmstart win at N=10 |
+| Fusion (pooled + GRU h=64) | First run of the fusion mechanism on all-sensor data, using the all-sensor point-set encoder and GRU h=64 checkpoint below | 50 | DeepReflecs | all-sensor | 0.9005 | Close the branch's last major gap: cross-sensor handoff had only ever been combined with the pooled MLP, not the GRU/fusion family | First result over 0.90 at the time; +0.0017 over GRU alone, almost identical gain to fusion's sensor2 N=50 result; later beaten by the MLP-embedding fusion above |
+| Fusion (raw quantile-bin histogram, no MLP + GRU h=64) | Same fusion head and GRU branch as the MLP-embedding fusion above, but the pooled branch is the raw 80-dim quantile-bin histogram vector itself, no MLP model | 50 | MLP | all-sensor | 0.9004 | Disambiguate whether the MLP-embedding fusion's gain comes from the MLP's learned hidden layer, or is already present in the histogram encoding it was computed from | Ties GRU alone/DeepReflecs-pooled fusion, 0.0044 below the MLP-embedding version; the gain is specific to the learned representation, not the underlying features |
+| Fusion, MLP end-to-end (random-init) | Same end-to-end setup as warmstart above, but the MLP encoder starts from random weights instead of the pretrained checkpoint | 50 | MLP | all-sensor | 0.9001 | Isolate how much of end-to-end's result depends on pretrained single-scan initialization vs. the fusion objective alone, same question already asked of the GRU-encoder end-to-end line | Slightly below warmstart (-0.0013) and below the frozen embedding (-0.0047); same warmstart-beats-random direction as the GRU-encoder line, but here even warmstart couldn't beat staying frozen |
+| GRU h=64 (no temporal) | First run of the frozen-embedding GRU on all-sensor data | 50 | DeepReflecs | all-sensor | 0.8988 | Same gap as fusion, for the GRU alone | Beats GRU h=128 (0.8930) at all-sensor scale, the opposite ordering from sensor2 (h=128 beat h=64 there); more real signal in the input seems to reduce capacity's marginal value, same shape as the temporal-scalar pattern |
+| GRU h=128 (no temporal) | Doubled hidden_size, same N=50 no-temporal config as the h=64 control | 50 | DeepReflecs | sensor2 | 0.887 | Check if the h=64→h=128 capacity gain still holds at N=50 | Best sensor2-only result; beats h=64+temporal (0.883) with capacity alone, same ordering as N=10 (capacity > temporal scalar); later beaten by both all-sensor GRU variants above |
+| GRU h=128 (no temporal) | First run at all-sensor scale | 50 | DeepReflecs | all-sensor | 0.8930 | Same all-sensor gap, h=128 | Beats every sensor2-only result and both all-sensor MLP baselines, but trails all-sensor h=64 (see above) |
+| GRU h=128 + temporal variation | First run of the combined capacity+temporal-scalar config on all-sensor data | 50 | DeepReflecs | all-sensor | 0.8914 | Same gap, GRU h=128+temporal | Small real regression vs. all-sensor h=128 alone (-0.0016), same direction as the sensor2 result (-0.0076) and the all-sensor N=20 pooled-MLP result (-0.0025); third confirmation that temporal variation turns negative once enough real signal is already present |
+| Transformer d=32 (plain) | First run of the Transformer on all-sensor data | 50 | DeepReflecs | all-sensor | 0.8914 | Same gap, Transformer | Beats its own sensor2 N=50 result (0.8727) by the same margin cross-sensor handoff gave the GRU/MLP lines |
+| Fusion (pooled + GRU h=64) | Filled the gap between the family's N=10 (sensor2) and N=50 (all-sensor) results; needed a new all-sensor N=20 point-set encoder and GRU h=64 checkpoint first, neither separately requested | 20 | DeepReflecs | all-sensor | 0.8897 | Direct N=20 counterpart to the N=50 all-sensor fusion result | +0.0002 over GRU alone, smaller even than N=50's already-noise-level +0.0017; fusion has now failed to clear its own GRU branch by a real margin at any N or sensor scope tried |
+| GRU h=64 (no temporal) | Same all-sensor gap-fill, GRU alone | 20 | DeepReflecs | all-sensor | 0.8895 | Direct N=20 counterpart to the N=50 all-sensor GRU h=64 result | Beats GRU h=128 (0.8867) again, same capacity reversal already seen at N=50, not a fluke of one window size |
+| Fusion (pooled + GRU h=64), 3 layers | Threaded a new `gru_num_layers` parameter through the fusion pipeline (previously hardcoded to 1 regardless of the loaded checkpoint), trained a 3-layer GRU checkpoint, ran fusion on top of it | 20 | DeepReflecs | all-sensor | 0.8892 | Depth ablation, same question already asked of hidden_size | Slightly below the 1-layer fusion (-0.0005), inside noise but not an improvement |
+| GRU h=128 (no temporal) | Same all-sensor gap-fill, h=128 | 20 | DeepReflecs | all-sensor | 0.8867 | Direct N=20 counterpart to the N=50 all-sensor GRU h=128 result | Trails h=64 by -0.0028, same direction as the -0.0058 gap at N=50 |
+| GRU h=64, 3 layers | Same GRU h=64 config, num_layers raised from 1 to 3 | 20 | DeepReflecs | all-sensor | 0.8862 | Depth ablation: is this line capacity-starved on depth the way width was already ruled out (h=128 loses to h=64 here) | Below 1-layer GRU (-0.0033); train_acc keeps climbing past epoch 40 while val_acc plateaus, same overfitting shape as the width ablation, third confirmation this line isn't capacity-starved at all-sensor scale |
+| Point-attention | New architecture: every pooled point across all N scans is one self-attention token, tagged with its own per-point recency, jointly learning aggregation and order instead of splitting them across two frozen branches (new module `deepreflecs_point_attention_track_accumulation.py`); point count capped at 300 (derived from real p99=269 stats) to bound attention's O(M^2) cost | 20 | DeepReflecs | all-sensor | 0.8847 | Test the diagnosis motivating fusion directly: does jointly learning cross-frame point aggregation and order recover more than gluing two frozen branches together after the fact | Worst N=20 all-sensor result of the whole GRU/fusion family, below even the 3-layer GRU; ~5 hours of GPU time, the branch's biggest architectural departure, and it lost ground rather than gained it, real evidence the diagnosis was wrong, not just an unlucky run |
+| GRU h=128 + temporal variation | Same all-sensor gap-fill, h=128+temporal | 20 | DeepReflecs | all-sensor | 0.8844 | Direct N=20 counterpart to the N=50 all-sensor combined config | Below h=128 alone (-0.0023), same direction as every other temporal-variation test at scale; fourth independent confirmation of the regression |
+| Transformer d=32 (plain) | Same all-sensor gap-fill, Transformer | 20 | DeepReflecs | all-sensor | 0.8820 | Direct N=20 counterpart to the N=50 all-sensor Transformer result | Weakest of the five GRU/Transformer/fusion variants at N=20, same relative ordering as N=50 |
+| Mamba | New architecture: sequence-mixing layer swapped from GRU to a selective state-space model (S6), same frozen per-scan embeddings and windowing (new module `deepreflecs_mamba_track_accumulation.py`); hit and fixed a numerical instability in a naive vectorized scan (see above), reverted to the correct sequential loop with batch size raised to 2048 to fix the resulting kernel-launch-overhead slowdown | 20 | DeepReflecs | all-sensor | 0.8816 | Test input-dependent per-channel gating against a GRU's single shared gate, motivated by matching real-time O(1)-streaming deployment constraints without a Transformer's KV cache | New worst N=20 all-sensor result, below point-attention (-0.0031) and GRU alone (-0.0079), despite mid-training val_acc peaks (~0.892-0.893) higher than the GRU/fusion references ever showed; second architecturally more expensive, more expressive replacement for GRU (after point-attention) to underperform it, same pattern both times |
+| GRU h=64, MLP-histogram embeddings | Same GRU architecture as the DeepReflecs-embedding reference, but the per-scan encoder feeding its recurrence is a newly-trained N=1 histogram-MLP (`compute_scan_embeddings_mlp`, new function) instead of DeepReflecs' point-set network; motivated by the frozen-MLP-embedding fusion's own win (0.9048, N=50), never before tested as a GRU input rather than a pooled fusion branch | 20 | MLP | all-sensor | 0.8713 | Test whether the histogram-MLP encoder that won as a pooled fusion branch also wins when fed through the GRU's own recurrence instead | Worst N=20 all-sensor result of the whole family, -0.0182 below the DeepReflecs-embedding GRU reference, real and large, not noise; the encoder that helped as a static pooled summary made the sequence model itself worse, which encoder wins depends on the role it plays |
+| DeepReflecs point-set baseline | Same all-sensor gap-fill, point-set line | 20 | DeepReflecs | all-sensor | 0.8635 | Direct N=20 counterpart to the N=50 all-sensor point-set result | Weakest of all six all-sensor N=20 variants, same relative position as at N=50 |
+| GRU h=64 + temporal variation | Concatenated the two temporal-variation scalars onto the GRU's final hidden state, pushed to N=50 instead of N=10 | 50 | DeepReflecs | sensor2 | 0.883 | Line had never been pushed past N=10, test if it scales with window size like the pooled MLP did | Uneven per-class (two_wheeler/pedestrian_group up hard, large_vehicle down); train/val gap still widening at epoch 100, not fully converged |
+| GRU h=128 + temporal variation | Same temporal-variation scalar concatenated onto the GRU's hidden state, this time at h=128 | 50 | DeepReflecs | sensor2 | 0.880 | The two strongest N=50 levers (capacity, temporal scalar) had never been combined | Real regression (-0.008) vs. h=128 alone, opposite direction from h=64 (+0.008); scalar's extra dims look like pure overfit capacity once the GRU is big enough to already imply the same signal |
+| Pooled + temporal variation, delta_t corrected | Histogram MLP trained on all-4-sensor windowed point sets (N=50) plus elapsed-time-normalized temporal variation scalars | 50 | MLP | all-sensor | 0.881 | Combine both known levers (bigger N, cross-sensor handoff) in one run | Axes stack rather than cancel, clears both individual bests; was overall best until GRU N=50 h=128 above |
+| Pooled control (no temporal) | Direct all-sensor N=50 counterpart of the all-sensor+temporal row above, scalar removed | 50 | MLP | all-sensor | 0.879 | Isolate handoff alone vs. handoff + temporal feature, every prior all-sensor run bundled both | Handoff alone is +0.021 over sensor2-only N=50; temporal scalar then adds only +0.002 more on top, most of it concentrated in recovering two_wheeler |
+| DeepReflecs point-set baseline | First run of the point-set trainer on all-sensor data, using the ragged fix throughout | 50 | DeepReflecs | all-sensor | 0.8755 | Same all-sensor gap as the GRU/Transformer/fusion family, for the point-set line | Beats its own sensor2 N=50 result (0.8527) by cross-sensor handoff, but stays the weakest of all seven all-sensor N=50 variants tried |
+| Fusion (pooled + GRU h=64) | Re-ran the N=10 fusion mechanism at N=50 once a real N=50 pooled point-set encoder existed | 50 | DeepReflecs | sensor2 | 0.877 | Check if fusion's gain persists once the GRU itself is stronger at larger N | Essentially nothing (+0.0017 over GRU alone), down from +0.006 at N=10; large_vehicle actively worse under fusion than either branch alone |
+| Orthogonalized fusion (pooled residual + GRU + temporal) | Same residualize-then-concatenate fix as the N=10 version, re-run at N=50 | 50 | DeepReflecs | sensor2 | 0.8755 | Direct counterpart to the N=10 orthogonalized fusion, at the new best N | Below GRU+temporal alone (-0.0075), same ordering as N=10; confirms the three-way fusion finding generalizes rather than being an N=10 artifact |
+| GRU h=64 (no temporal) | Direct N=50 counterpart of the N=10 no-temporal GRU control | 50 | DeepReflecs | sensor2 | 0.875 | Isolate how much of the 0.883 result is N=50 alone vs. N=50+temporal | +0.028 over N=10 GRU baseline from window size alone; temporal scalar then adds only +0.008 more, a smaller marginal gain than at N=10 (+0.013) |
+| Transformer d=32 + temporal variation | Same temporal-variation scalar concatenated onto the Transformer's output, pushed to N=50 | 50 | DeepReflecs | sensor2 | 0.8734 | Direct Transformer counterpart to the GRU's N=50 temporal-variation test | Flat (+0.0007), same as N=10; Transformer still doesn't pick up anything extra from the scalar at either N |
+| Transformer d=32 (plain) | Same precomputed embeddings/windowing as the GRU, no temporal scalar, pushed to N=50 | 50 | DeepReflecs | sensor2 | 0.8727 | Check if the Transformer's N=10 capacity ceiling was a window-size artifact | Gains almost exactly as much as the GRU from N=10 to N=50 (+0.027 vs +0.028), unlike the N=10 capacity ablation; still trails GRU by about the same margin |
 | Pooled + temporal variation, uncorrected gap-norm | Same all-sensor histogram MLP pipeline at N=20, temporal variation normalized by gap count, not yet elapsed time | 20 | MLP | all-sensor | 0.871 | Push cross-sensor handoff to a bigger window | Was best at the time; later found to overstate the gain (see corrected row) |
 | Pooled + temporal variation | Histogram MLP on sensor-2-only N=50 windows plus temporal variation scalars | 50 | MLP | sensor2 | 0.867 | Same feature at the largest single-sensor window tried | New best for sensor2-only line; feature's own delta not monotonic across N, reads as noise not trend |
+| Pooled control (no temporal) | Direct all-sensor N=20 counterpart of the delta_t-corrected row below, scalar removed | 20 | MLP | all-sensor | 0.8685 | Isolate handoff alone vs. handoff + temporal feature at N=20, same isolation already done at N=50 | Handoff alone is +0.0165 over sensor2-only N=20; temporal scalar then makes it slightly worse (-0.0025), not just smaller, same direction as the GRU h=128+temporal regression |
 | Pooled + temporal variation, delta_t corrected | Re-ran N=20 all-sensor with temporal variation renormalized by real elapsed time instead of gap count | 20 | MLP | all-sensor | 0.866 | Uncorrected gap-normalization assumed uniform gap duration, false once sensor handoffs mix short/long gaps | Small real correction, all classes down a little; erases the earlier win over sensor2 N=50, now roughly tied |
 | GRU h=128 | Doubled the GRU's hidden_size from 64 to 128, otherwise identical config | 10 | DeepReflecs | sensor2 | 0.862 | Check if h=64 GRU was capacity-limited | Real, non-trivial +0.015; GRU not capacity-saturated at h=64 |
 | GRU h=64 + temporal variation | Concatenated the two temporal-variation scalars onto the GRU's h=64 hidden state before the MLP head | 10 | DeepReflecs | sensor2 | 0.860 | Add the cheap temporal scalar directly, bypass the frozen encoder's bottleneck | Biggest single gain in this line at N=10 (+0.013), bigger than fusion, far fewer added params |
@@ -603,6 +1045,7 @@ Every variant tried in this branch, one row each, sorted by macro F1 descending.
 | Orthogonalized fusion (pooled residual + GRU + temporal) | Regressed the pooled embedding on the temporal scalars (fit on train), kept only the residual, concatenated with GRU hidden state and temporal scalars into one MLP head | 10 | DeepReflecs | sensor2 | 0.854 | Probe found ~35% shared variance between pooled embedding and temporal scalar; test if removing overlap recovers a cleaner additive gain | Worse than GRU+temporal alone; residual carries no independent signal, closes the three-way fusion question |
 | End-to-end GRU, warmstart | Unfroze the DeepReflecs encoder, backpropagated through it every window, initialized from the separately-trained N=1 encoder + precompute GRU checkpoints | 10 | DeepReflecs | sensor2 | 0.853 | Let the frozen encoder keep adapting to the temporal objective | Real +0.006 over frozen GRU |
 | Fusion (pooled + GRU h=64) | Concatenated the pooled (order-blind, all-N-scans) DeepReflecs embedding with the GRU's final hidden state, trained a new small MLP head, both branches frozen | 10 | DeepReflecs | sensor2 | 0.853 | Test if the order-blind pooled branch knows anything the GRU sequence branch doesn't | Real but modest +0.006, lands almost identical to end-to-end warmstart via a totally different mechanism |
+| Pooled control | DeepReflecs point-set encoder run directly on N=50 pooled points, sensor2-only, needed two real memory-bug fixes (see the OOM section) before it could finish | 50 | DeepReflecs | sensor2 | 0.8527 | Direct point-set counterpart of the GRU/MLP N=50 results; first time this variant has completed at N=50 | Below both the GRU line (0.875+) and pooled MLP line (0.879+) at the same N, the point-set line's own N-scaling (0.825 at N=10 to 0.853 at N=50, +0.028) is smaller than either alternative's move over the same N range |
 | Pooled control | Histogram MLP, N=20, no extra features | 20 | MLP | sensor2 | 0.852 | Base accumulation hadn't saturated at N=10 like the DeepReflecs curve suggested | Real +0.021 over N=10 |
 | Transformer d=64 | Doubled d_model from 32 to 64 (and dim_feedforward alongside it), otherwise identical Transformer config | 10 | DeepReflecs | sensor2 | 0.848 | Check if the Transformer was capacity-limited like the GRU turned out to be | Barely moved (+0.002) despite comparable relative param jump; reads as a real architectural ceiling |
 | GRU h=64 | Ran a frozen per-scan DeepReflecs encoder over each scan, fed the embedding sequence into a causal unidirectional GRU (packed variable-length sequences), MLP head on the final hidden state | 10 | DeepReflecs | sensor2 | 0.847 | Test per-scan embeddings + learned temporal aggregation instead of pooling raw points, causal for real-time deployment | Beats histogram control (+0.016), edges out best hand-engineered feature (+0.002); two_wheeler clearly ahead |
@@ -630,15 +1073,11 @@ Every variant tried in this branch, one row each, sorted by macro F1 descending.
 | Variant | N | Model | Sensor | Motivation |
 |---|---|---|---|---|
 | Pooled + temporal variation, delta_t corrected | 10 | MLP | all-sensor | Fix was applied at N=20/50 but never re-run at N=10 |
-| Pooled control (no temporal) | 10, 20, 50 | MLP | all-sensor | Isolate handoff alone vs. handoff + temporal feature, every all-sensor run bundles both |
-| DeepReflecs point-set pooling | 20, 50 | DeepReflecs | sensor2 | Would show if point-set N-scaling matches the MLP's; MLP took over for pushing N instead |
+| Pooled control (no temporal) | 10 | MLP | all-sensor | Isolate handoff alone vs. handoff + temporal feature; done at N=20/50, not yet at N=10 |
+| DeepReflecs point-set pooling | 20 | DeepReflecs | sensor2 | Would show if point-set N-scaling matches the MLP's; MLP took over for pushing N instead |
 | GRU h=64 | 20 | DeepReflecs | sensor2 | Fill the gap between N=10 and N=50 GRU results |
-| GRU h=64 (no temporal) | 50 | DeepReflecs | sensor2 | Isolate how much of the 0.883 is N=50 alone vs. N=50+temporal |
-| GRU h=128 | 50 | DeepReflecs | sensor2 | Check if the h=64→h=128 capacity gain still holds at N=50 |
-| Transformer d=32 (plain) | 20, 50 | DeepReflecs | sensor2 | Check if the Transformer's apparent ceiling at N=10 is a window-size artifact |
-| Transformer d=32 + temporal variation | 50 | DeepReflecs | sensor2 | Direct Transformer counterpart to the GRU N=50 jump |
-| Fusion (pooled + GRU) | 20, 50 | DeepReflecs | sensor2 | Check if fusion's gain persists once GRU itself is stronger at larger N |
-| Orthogonalized fusion | 50 | DeepReflecs | sensor2 | Direct counterpart to the N=10 orthogonalized fusion, at the new best N |
+| Transformer d=32 (plain) | 20 | DeepReflecs | sensor2 | Check if the Transformer's apparent ceiling at N=10 is a window-size artifact |
+| Fusion (pooled + GRU) | 20 | DeepReflecs | sensor2 | Done at N=50 and N=10, not yet at N=20 |
 | End-to-end GRU (warmstart/random) | 20, 50 | DeepReflecs | sensor2 | Check if end-to-end's edge over frozen GRU holds at larger N, also needs the collation fix's memory profile re-checked |
 | GRU h=64 | 10 | DeepReflecs | all-sensor | Sequence-model line never combined with cross-sensor handoff, the MLP's second-biggest lever |
 | Transformer d=32 | 10 | DeepReflecs | all-sensor | Same, for the Transformer |

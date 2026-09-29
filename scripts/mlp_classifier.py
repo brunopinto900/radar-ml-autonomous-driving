@@ -81,6 +81,12 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
+    def forward_features(self, x):
+        """Penultimate hidden-layer activation, everything in `net` except the final
+        classification Linear: the MLP-line analogue of DeepReflecs' point_dim
+        embedding (a learned pre-classifier representation, not the final logits)."""
+        return self.net[:-1](x)
+
 
 def apply_mlp_class_groups(df: pd.DataFrame) -> pd.DataFrame:
     """Maps raw label_name to the current working class (dataloader.MLP_CLASS_GROUPS, bus

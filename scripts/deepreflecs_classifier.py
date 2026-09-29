@@ -144,7 +144,9 @@ def _predict_in_batches(
     logits = []
     with torch.no_grad():
         for start in range(0, len(X), batch_size):
-            logits.append(model(X[start : start + batch_size], mask[start : start + batch_size]))
+            batch_x = X[start : start + batch_size].to(DEVICE)
+            batch_mask = mask[start : start + batch_size].to(DEVICE)
+            logits.append(model(batch_x, batch_mask))
     return torch.cat(logits, dim=0)
 
 
@@ -242,22 +244,25 @@ def train_deepreflecs(
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 
-    X_train_t = torch.tensor(X_train, device=DEVICE)
-    mask_train_t = torch.tensor(mask_train, device=DEVICE)
+    # Kept on CPU, moved to DEVICE per batch below: at large m_max (track-accumulation,
+    # N=50) the whole padded split no longer fits in GPU memory at once (see
+    # track_accumulation.md, "Pooled DeepReflecs point-set at N=50: a second, different OOM").
+    X_train_t = torch.tensor(X_train)
+    mask_train_t = torch.tensor(mask_train)
     y_train_t = torch.tensor(y_train, device=DEVICE)
-    X_val_t = torch.tensor(X_val, device=DEVICE)
-    mask_val_t = torch.tensor(mask_val, device=DEVICE)
+    X_val_t = torch.tensor(X_val)
+    mask_val_t = torch.tensor(mask_val)
     y_val_t = torch.tensor(y_val, device=DEVICE)
 
     n = len(X_train_t)
     history = []
     for epoch in range(epochs):
         model.train()
-        perm = torch.randperm(n, device=DEVICE)
+        perm = torch.randperm(n)
         epoch_loss, epoch_correct = 0.0, 0
         for start in range(0, n, batch_size):
             idx = perm[start : start + batch_size]
-            batch_x, batch_mask, batch_y = X_train_t[idx], mask_train_t[idx], y_train_t[idx]
+            batch_x, batch_mask, batch_y = X_train_t[idx].to(DEVICE), mask_train_t[idx].to(DEVICE), y_train_t[idx]
 
             optimizer.zero_grad()
             logits = model(batch_x, batch_mask)
@@ -391,8 +396,8 @@ def _evaluate_metrics(
     regenerated fresh, cheap regardless."""
     from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
 
-    X_t = torch.tensor(X, device=DEVICE)
-    mask_t = torch.tensor(mask, device=DEVICE)
+    X_t = torch.tensor(X)
+    mask_t = torch.tensor(mask)
     y_pred = _predict_in_batches(model, X_t, mask_t).argmax(dim=1).cpu().numpy()
 
     if metrics_cache.exists() and metrics_cache.stat().st_mtime >= model_cache.stat().st_mtime:

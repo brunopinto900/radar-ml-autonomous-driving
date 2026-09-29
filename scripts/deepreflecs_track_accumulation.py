@@ -29,6 +29,7 @@ from deepreflecs_classifier import (
     CONV_DIM,
     DEVICE,
     EPOCHS,
+    EVAL_BATCH_SIZE,
     LEARNING_RATE,
     POINT_DIM,
     RANDOM_STATE,
@@ -41,6 +42,7 @@ from deepreflecs_classifier import (
 )
 from feature_distributions import MLP_CLASSES
 from mlp_classifier import apply_mlp_class_groups
+from separability_probe import class_weights
 from sequence_split import load_split
 from taxonomy_separability import INSTANCE_COLS
 
@@ -190,6 +192,236 @@ def prepare_windowed_split_point_sets(
         f"val={len(val_sets)} test={len(test_sets)}, m_max={m_max}"
     )
     return X_train, mask_train, y_train, X_val, mask_val, y_val, X_test, mask_test, y_test, features
+
+
+def prepare_windowed_split_point_sets_ragged(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    features: list[str] = REFLECTION_FEATURES,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    range_sc_mode: str = "broadcast",
+    splits: dict[str, list[str]] | None = None,
+):
+    """Same split-then-build structure as prepare_windowed_split_point_sets, but never
+    calls pad_to_fixed on a whole split: returns ragged (list[np.ndarray]) point sets
+    per split instead of one dense (n_windows, m_max, n_features) array. At large N a
+    single outlier window can push m_max into the thousands, and padding every window
+    in a 350k+-window split to that one shared value OOMs in plain CPU memory before
+    any GPU work starts (see track_accumulation.md, "Pooled DeepReflecs point-set at
+    N=50"). train_deepreflecs_ragged pads fresh per mini-batch instead, to that batch's
+    own max, the same fix already used for the end-to-end variant's
+    collate_scan_sequences."""
+    if splits is None:
+        splits = load_split()
+
+    train_df = df.loc[df["sequence_name"].isin(splits["train"])]
+    val_df = df.loc[df["sequence_name"].isin(splits["val"])]
+    test_df = df.loc[df["sequence_name"].isin(splits["test"])]
+
+    train_sets, y_train = build_windowed_point_sets(train_df, classes, features, n, stride, range_sc_mode)
+    val_sets, y_val = build_windowed_point_sets(val_df, classes, features, n, stride, range_sc_mode)
+    test_sets, y_test = build_windowed_point_sets(test_df, classes, features, n, stride, range_sc_mode)
+
+    all_train_points = np.concatenate(train_sets)
+    mean = all_train_points.mean(axis=0).astype("float32")
+    std = all_train_points.std(axis=0).astype("float32")
+    std = np.where(std > 0, std, 1.0).astype("float32")
+
+    global_m_max = max(p.shape[0] for p in (*train_sets, *val_sets, *test_sets))
+    print(
+        f"N={n} stride={stride} range_sc_mode={range_sc_mode} (ragged): windows "
+        f"train={len(train_sets)} val={len(val_sets)} test={len(test_sets)}, "
+        f"global m_max would have been {global_m_max} (never padded to it)"
+    )
+    return train_sets, y_train, val_sets, y_val, test_sets, y_test, mean, std
+
+
+def _predict_in_batches_ragged(
+    model: DeepReflecs, point_sets: list[np.ndarray], batch_size: int = EVAL_BATCH_SIZE
+) -> torch.Tensor:
+    """Same idea as deepreflecs_classifier._predict_in_batches, but starting from a
+    ragged list instead of an already-padded dense array: pads each mini-batch to that
+    batch's own max points right before the forward pass, never a whole-split array."""
+    model.eval()
+    logits = []
+    with torch.no_grad():
+        for start in range(0, len(point_sets), batch_size):
+            batch_sets = point_sets[start : start + batch_size]
+            batch_m_max = max(s.shape[0] for s in batch_sets)
+            batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+            batch_x_t = torch.tensor(batch_x, device=DEVICE)
+            batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+            logits.append(model(batch_x_t, batch_mask_t))
+    return torch.cat(logits, dim=0)
+
+
+def train_deepreflecs_ragged(
+    train_sets: list[np.ndarray],
+    y_train: np.ndarray,
+    val_sets: list[np.ndarray],
+    y_val: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    batch_size: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    conv_dim: int = CONV_DIM,
+    point_dim: int = POINT_DIM,
+):
+    """Ragged counterpart of deepreflecs_classifier.train_deepreflecs: never builds one
+    dense (n_windows, m_max, n_features) array for a whole split, pads fresh per
+    mini-batch instead (see prepare_windowed_split_point_sets_ragged). Standardization
+    is applied per-window before padding (mean/std fit on train's real points only,
+    passed in), instead of via a boolean mask over a padded array."""
+    torch.manual_seed(random_state)
+    n_features = train_sets[0].shape[1]
+
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train]))
+    weight_tensor = torch.tensor(
+        [weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE
+    )
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
+
+    model = DeepReflecs(n_features, num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
+
+    train_std = [(s - mean) / std for s in train_sets]
+    val_std = [(s - mean) / std for s in val_sets]
+    y_train_t = torch.tensor(y_train, device=DEVICE)
+    y_val_t = torch.tensor(y_val, device=DEVICE)
+
+    n = len(train_std)
+    history = []
+    for epoch in range(epochs):
+        model.train()
+        perm = torch.from_numpy(np.random.permutation(n))
+        epoch_loss, epoch_correct = 0.0, 0
+        for start in range(0, n, batch_size):
+            idx = perm[start : start + batch_size]
+            batch_sets = [train_std[i] for i in idx.tolist()]
+            batch_m_max = max(s.shape[0] for s in batch_sets)
+            batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+            batch_x_t = torch.tensor(batch_x, device=DEVICE)
+            batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+            batch_y = y_train_t[idx]
+
+            optimizer.zero_grad()
+            logits = model(batch_x_t, batch_mask_t)
+            loss = criterion(logits, batch_y)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * len(idx)
+            epoch_correct += (logits.argmax(dim=1) == batch_y).sum().item()
+
+        train_loss = epoch_loss / n
+        train_acc = epoch_correct / n
+
+        val_logits = _predict_in_batches_ragged(model, val_std)
+        val_acc = (val_logits.argmax(dim=1) == y_val_t).float().mean().item()
+
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}")
+
+    return model, history
+
+
+def run_windowed_training_ragged(
+    df: pd.DataFrame,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    range_sc_mode: str = "broadcast",
+    classes: list[str] = MLP_CLASSES,
+    features: list[str] = REFLECTION_FEATURES,
+    epochs: int = EPOCHS,
+    batch_size: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    output_dir=None,
+    splits: dict[str, list[str]] | None = None,
+    conv_dim: int = CONV_DIM,
+    point_dim: int = POINT_DIM,
+):
+    """Ragged counterpart of run_windowed_training: same output_dir/artifact naming
+    (deepreflecs_model.pt etc.), so anything downstream that loads an already-trained
+    pooled encoder (e.g. deepreflecs_rnn_track_accumulation.compute_pooled_embeddings)
+    doesn't need to change. Use this instead of run_windowed_training at N large enough
+    that the whole-split dense array doesn't fit in system memory (N=50 sensor2
+    measured at ~9.9GB for X_train alone, see track_accumulation.md)."""
+    if output_dir is None:
+        suffix = "" if range_sc_mode == "broadcast" else f"_range{range_sc_mode}"
+        output_dir = TRACK_ACC_DIR / f"N{n}_stride{stride}{suffix}"
+    if splits is None:
+        splits = load_split()
+
+    train_sets, y_train, val_sets, y_val, test_sets, y_test, mean, std = prepare_windowed_split_point_sets_ragged(
+        df, classes=classes, features=features, n=n, stride=stride, range_sc_mode=range_sc_mode, splits=splits,
+    )
+
+    model, history = train_deepreflecs_ragged(
+        train_sets, y_train, val_sets, y_val, mean, std, classes=classes, epochs=epochs,
+        batch_size=batch_size, lr=lr, random_state=random_state, conv_dim=conv_dim, point_dim=point_dim,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "deepreflecs_model.pt")
+    print(f"Saved {output_dir / 'deepreflecs_model.pt'}")
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, test_sets, y_test, mean, std
+
+
+def evaluate_windowed_test_metrics_ragged(
+    model: DeepReflecs,
+    test_sets: list[np.ndarray],
+    y_test: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+    classes: list[str] = MLP_CLASSES,
+    output_dir=None,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    range_sc_mode: str = "broadcast",
+):
+    """Ragged counterpart of evaluate_windowed_test_metrics: same output filenames/
+    format, computed via _predict_in_batches_ragged instead of one dense test array."""
+    if output_dir is None:
+        suffix = "" if range_sc_mode == "broadcast" else f"_range{range_sc_mode}"
+        output_dir = TRACK_ACC_DIR / f"N{n}_stride{stride}{suffix}"
+
+    from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
+
+    test_std = [(s - mean) / std for s in test_sets]
+    y_pred = _predict_in_batches_ragged(model, test_std).argmax(dim=1).cpu().numpy()
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_test, y_pred, labels=range(len(classes)), zero_division=0
+    )
+    metrics_df = pd.DataFrame({"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes)
+    split_name = f"test (N={n}, stride={stride}, range_sc_mode={range_sc_mode}, ragged)"
+    print(f"per-class precision/recall/f1 ({split_name}):")
+    print(metrics_df.round(3).to_string())
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_json(output_dir / "deepreflecs_test_metrics.json", orient="index", indent=2)
+    print(f"Saved {output_dir / 'deepreflecs_test_metrics.json'}")
+
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(y_test, y_pred, labels=range(len(classes)), normalize="true")
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
+    ax.set_title(f"DeepReflecs: {split_name} confusion matrix (row-normalized)")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    fig.tight_layout()
+    confusion_matrix_path = output_dir / "deepreflecs_test_confusion_matrix.png"
+    fig.savefig(confusion_matrix_path, dpi=150)
+    print(f"Saved {confusion_matrix_path}")
+
+    return metrics_df
 
 
 def run_windowed_training(
