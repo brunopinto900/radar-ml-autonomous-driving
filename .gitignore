@@ -29,6 +29,11 @@ results/class_imbalance/*
 results/deepreflecs/*
 !results/deepreflecs/deepreflecs_confusion_matrix.png
 !results/deepreflecs/comparison_f1_bar.png
+!results/track_accumulation_rnn/
+results/track_accumulation_rnn/*
+!results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/
+results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/*
+!results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/fusion_test_confusion_matrix.png
 scratch_exploration/
 __pycache__/
 .ipynb_checkpoints/
