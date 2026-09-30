@@ -9,6 +9,8 @@ MLP_DESIGN.md
 MLP_FINDINGS.md
 MLP_Decisions_and_Findings_lengthy.md
 notebooks/mlp_ablations_lengthy.ipynb
+track_accumulation.md
+notebooks/track_accumulation_n20_allsensors.ipynb
 results/*
 !results/mlp/
 results/mlp/*
