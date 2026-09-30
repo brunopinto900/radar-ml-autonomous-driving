@@ -36,6 +36,7 @@ results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/*
 !results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/fusion_test_confusion_matrix.png
 !results/final_report/
 scratch_exploration/
+social/
 __pycache__/
 .ipynb_checkpoints/
 scripts/regime_specialist_mlps.py

@@ -157,6 +157,11 @@ on (Figure 4).
   encoder: histograms, explicit per-instance statistics (median, max, min, spread), and DeepReflecs' learned
   point-set network all converge to a similar macro F1 band on single-scan data
   (Section 2). The bottleneck is point count, not model choice.
+- Beyond raw point count, a tracked object's radar signature evolves scan to scan:
+  a pedestrian's micro-Doppler shifts as limbs swing, and RCS fluctuates as an
+  object's dominant reflectors change with aspect angle. None of that is visible in
+  a single scan, motivating a sequence model over the per-scan embeddings (Section 5)
+  in addition to simply pooling more points.
 - A `track_id` persists across a tracked object's lifetime, multiple radar scans of
   the *same* object, and all 4 sensors share one global clock. Pooling a track's last
   N scans' points into one decision, instead of one scan's points, attacks sparsity
