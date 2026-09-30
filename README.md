@@ -30,7 +30,7 @@ numbers is backed by a validated experiment, see "Where to start reading" below.
 ![Fusion model confusion matrix, N=20 all sensors](results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/fusion_test_confusion_matrix.png)
 
 Full writeup, single-scan through multi-scan, with confusion-matrix interpretation
-and ablations: `notebooks/final_report.ipynb`.
+and ablations: `final_report.md` (renders directly on GitHub) or `notebooks/final_report.ipynb`.
 
 ## Setup
 
@@ -94,9 +94,10 @@ python3 scripts/run_multiscan_pipeline.py 50 all       # N=50, all sensors
 
 ## Where to start reading
 
-1. `notebooks/final_report.ipynb`: single-scan through multi-scan, one document,
-   abstract and headline results up front, confusion-matrix interpretation, brief
-   ablations, conclusions and future work. Start here.
+1. `final_report.md` (or `notebooks/final_report.ipynb`, same content): single-scan
+   through multi-scan, one document, abstract and headline results up front,
+   confusion-matrix interpretation, brief ablations, conclusions and future work.
+   Start here.
 2. `Design_Decisions.md`: taxonomy, encoding, and split decisions behind the
    single-scan baseline, with evidence.
 3. `MLP_Report.md`: in-depth writeup of the single-scan MLP ablation program,
