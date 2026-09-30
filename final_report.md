@@ -472,7 +472,7 @@ ax.annotate("", xy=(11.55, concat_y + h5 / 2), xytext=(x5 + w5, concat_y + h5 / 
             arrowprops=dict(arrowstyle="->", color="k", lw=1.3))
 ax.text(11.75, concat_y + h5 / 2, "5\nclasses", ha="left", va="center", fontsize=8, fontweight="bold")
 
-ax.set_title("Fusion: order-blind pooled embedding + causal GRU hidden state, both frozen", fontsize=10, pad=14)
+ax.set_title("Fusion: order-blind pooled embedding + causal GRU hidden state", fontsize=10, pad=14)
 fig.tight_layout()
 plt.show()
 ```
