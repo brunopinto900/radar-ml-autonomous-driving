@@ -100,7 +100,7 @@ python3 scripts/run_multiscan_pipeline.py 50 all       # N=50, all sensors
    Start here.
 2. `Design_Decisions.md`: taxonomy, encoding, and split decisions behind the
    single-scan baseline, with evidence.
-3. `MLP_Report.md`: in-depth writeup of the single-scan MLP ablation program,
+3. `single_scan_final_report.md`: in-depth writeup of the single-scan MLP ablation program,
    per-class error mechanisms, methodology notes.
 4. `deepreflecs.md` / `model_comparison.md`: DeepReflecs vs. the baseline MLP, and a
    4-way encoding comparison, both cross-validated.
@@ -118,7 +118,7 @@ notebooks/           EDA, MLP, and multi-scan report notebooks
 results/             generated plots + cached tables (gitignored, a few figures allow-listed)
 data/                the RadarScenes dataset (gitignored)
 Design_Decisions.md               taxonomy/encoding/split decisions and evidence
-MLP_Report.md                     in-depth single-scan MLP writeup
+single_scan_final_report.md       in-depth single-scan MLP writeup
 deepreflecs.md                    DeepReflecs vs. baseline MLP, cross-validated
 model_comparison.md               baseline vs. range-extended encodings vs. DeepReflecs
 MLP_CONFIG.json                   every trained MLP variant's config
@@ -134,10 +134,10 @@ visualize.sh          rad_viewer launcher
 - **`sequence_split.py`**: fixed ~70/15/15 sequence-grouped train/val/test split, cached to `results/data/sequence_split.json`. `python3 scripts/sequence_split.py`
 - **`feature_distributions.py` / `histogram_separability.py`**: picks the histogram encoding's bin range/count via separability-probe CV, not visual inspection. `python3 scripts/feature_distributions.py`, `python3 scripts/histogram_separability.py`
 - **`batch_size_selection.py`**: picks batch size + learning rate from train-split class frequencies (rare-class per-batch miss probability). `python3 scripts/batch_size_selection.py`
-- **`mlp_classifier.py`**: the baseline single-scan MLP (65->16->16->5), cached training/eval; architecture and findings in `MLP_Report.md`. `python3 scripts/mlp_classifier.py`
+- **`mlp_classifier.py`**: the baseline single-scan MLP (65->16->16->5), cached training/eval; architecture and findings in `single_scan_final_report.md`. `python3 scripts/mlp_classifier.py`
 - **`MLP_CONFIG.json` / `mlp_variants.py` / `class_taxonomy_experiment.py`**: registry of every trained MLP variant (see "Quick start" above for how to run one), and the taxonomy ablation that led to the `bus`/`large_vehicle` merge. `python3 scripts/mlp_variants.py <variant>`
 - **`split_sensitivity.py`**: how much macro F1 depends on split choice alone; the noise floor every other ablation is judged against. `python3 scripts/split_sensitivity.py`
-- **`pedestrian_separability.py`**: sparse-vs-dense separability probe for the `pedestrian`/`two_wheeler` pair, see `MLP_Report.md`.
+- **`pedestrian_separability.py`**: sparse-vs-dense separability probe for the `pedestrian`/`two_wheeler` pair, see `single_scan_final_report.md`.
 - **`deepreflecs_classifier.py`**: single-scan DeepReflecs point-set classifier (`deepreflecs.md`). `python3 scripts/deepreflecs_classifier.py`
 - **`deepreflecs_track_accumulation.py`**: multi-scan point pooling (windowed DeepReflecs), the naive baseline `run_multiscan_pipeline.py` builds on.
 - **`deepreflecs_rnn_track_accumulation.py`**: per-scan embeddings, GRU, and fusion (pooled + GRU); see "Quick start: multi-scan accumulation" above.
