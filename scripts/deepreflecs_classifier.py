@@ -59,16 +59,33 @@ COMPARISON_SUMMARY_FILENAME = "comparison_summary.json"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def masked_pool(x: torch.Tensor, mask: torch.Tensor, pooling: str = "max", keepdim: bool = False) -> torch.Tensor:
+    """Reduces x (B, M, F) over the point axis (dim=1), ignoring padded points (mask:
+    (B, M) bool, True at real points), via either a masked max or a masked median.
+    Shared by GlobalContextLayer and DeepReflecs' own final pool so both switch together."""
+    if pooling == "max":
+        masked = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
+        return masked.max(dim=1, keepdim=keepdim).values
+    if pooling == "median":
+        masked = x.masked_fill(~mask.unsqueeze(-1), float("nan"))
+        return torch.nanmedian(masked, dim=1, keepdim=keepdim).values
+    raise ValueError(f"pooling must be 'max' or 'median', got {pooling!r}")
+
+
 class GlobalContextLayer(nn.Module):
-    """Paper Fig. 3: max-pools the local per-point features (over the point axis, ignoring
+    """Paper Fig. 3: pools the local per-point features (over the point axis, ignoring
     padded points via `mask`) to one global feature vector, then concatenates that global
     vector, repeated once per point, back onto every point's own local features. Doubles the
-    feature width; no trainable parameters, same as the paper."""
+    feature width; no trainable parameters, same as the paper (which uses max; `pooling`
+    lets DeepReflecs swap in a masked median instead, see masked_pool)."""
+
+    def __init__(self, pooling: str = "max"):
+        super().__init__()
+        self.pooling = pooling
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         # x: (B, M, F), mask: (B, M) bool, True at real (non-padding) points
-        masked = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
-        global_feature = masked.max(dim=1, keepdim=True).values  # (B, 1, F)
+        global_feature = masked_pool(x, mask, self.pooling, keepdim=True)  # (B, 1, F)
         global_feature = global_feature.expand(-1, x.shape[1], -1)  # (B, M, F)
         return torch.cat([x, global_feature], dim=-1)  # (B, M, 2F)
 
@@ -82,13 +99,19 @@ class DeepReflecs(nn.Module):
 
     input: (M, n_features) associated reflections of one object, M arbitrary and unordered.
     (M, n_features) -> conv1+ReLU -> (M, CONV_DIM) -> GlobalContextLayer -> (M, 2*CONV_DIM)
-    -> conv2+ReLU -> (M, POINT_DIM) -> masked global max pool -> (POINT_DIM) -> dense -> (C)
-    """
+    -> conv2+ReLU -> (M, POINT_DIM) -> masked global pool -> (POINT_DIM) -> dense -> (C)
 
-    def __init__(self, n_features: int, num_classes: int, conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM):
+    pooling: "max" (the paper's choice, default) or "median", applied identically at both
+    the GlobalContextLayer's internal pool and the final one (see masked_pool)."""
+
+    def __init__(
+        self, n_features: int, num_classes: int, conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM,
+        pooling: str = "max",
+    ):
         super().__init__()
+        self.pooling = pooling
         self.point_conv1 = nn.Linear(n_features, conv_dim)
-        self.context = GlobalContextLayer()
+        self.context = GlobalContextLayer(pooling=pooling)
         self.point_conv2 = nn.Linear(conv_dim * 2, point_dim)
         self.classifier = nn.Linear(point_dim, num_classes)
 
@@ -96,8 +119,7 @@ class DeepReflecs(nn.Module):
         x = torch.relu(self.point_conv1(points))
         x = self.context(x, mask)
         x = torch.relu(self.point_conv2(x))
-        x = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
-        x = x.max(dim=1).values
+        x = masked_pool(x, mask, self.pooling)
         return self.classifier(x)
 
 
@@ -226,6 +248,7 @@ def train_deepreflecs(
     random_state: int = RANDOM_STATE,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
 ):
     """Trains DeepReflecs with Adam, class-count-weighted cross-entropy (same weighting scheme
     as train_mlp, for a like-for-like comparison). X_train/mask_train are already padded to one
@@ -240,7 +263,9 @@ def train_deepreflecs(
     print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
 
     n_features = X_train.shape[2]
-    model = DeepReflecs(n_features, num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model = DeepReflecs(
+        n_features, num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+    ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss(weight=weight_tensor)
 

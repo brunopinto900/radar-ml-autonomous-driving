@@ -41,6 +41,7 @@ from deepreflecs_classifier import (
     REFLECTION_FEATURES,
     DeepReflecs,
     build_point_sets,
+    masked_pool,
     pad_to_fixed,
     plot_training_curves,
 )
@@ -73,13 +74,14 @@ RANDOM_STATE = 0
 
 def embed_points(model: DeepReflecs, points: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """DeepReflecs.forward stopped right before the final classification dense layer:
-    shared per-point layers, global context layer, masked global max pool. This
+    shared per-point layers, global context layer, masked global pool (model.context
+    already carries the model's own pooling mode from construction; model.pooling
+    matches it for the final pool here, see deepreflecs_classifier.masked_pool). This
     POINT_DIM-wide vector is the frozen per-scan feature the GRU consumes."""
     x = torch.relu(model.point_conv1(points))
     x = model.context(x, mask)
     x = torch.relu(model.point_conv2(x))
-    x = x.masked_fill(~mask.unsqueeze(-1), float("-inf"))
-    return x.max(dim=1).values
+    return masked_pool(x, mask, model.pooling)
 
 
 def fit_reflection_standardization(
@@ -129,6 +131,7 @@ def compute_scan_embeddings(
     encoder_dir=ENCODER_DIR,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
     splits: dict[str, list[str]] | None = None,
     batch_size: int = 1024,
     standardization_df: pd.DataFrame | None = None,
@@ -161,7 +164,9 @@ def compute_scan_embeddings(
     point_sets, labels, keys_df = build_scan_point_sets_with_keys(df, classes, features)
     point_sets_std = [(p - mean) / std for p in point_sets]
 
-    model = DeepReflecs(len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model = DeepReflecs(
+        len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+    ).to(DEVICE)
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     model.eval()
 
@@ -190,6 +195,145 @@ def get_or_compute_scan_embeddings(df: pd.DataFrame, cache_path=EMBEDDINGS_CACHE
         print(f"{cache_path} already exists, loading cached embeddings")
         return pd.read_parquet(cache_path)
     result = compute_scan_embeddings(df, **kwargs)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    result.to_parquet(cache_path)
+    print(f"Saved {cache_path}")
+    return result
+
+
+# --- richer per-step input: instead of a frozen N=1 single-scan embedding, each
+# timestep's embedding comes from a small pooled sub-window (the last sub_n scans,
+# stride=1), run through an encoder trained end-to-end on that sub_n-scan pooled input.
+# This changes what the GRU's input stream itself carries, unlike fusion (one global,
+# order-blind summary glued onto only the final hidden state) or the plain N=1 control
+# (one scan's ~2.9 points, whatever information that captures is the ceiling every
+# downstream sequence-mixing architecture shares). ---
+
+
+def build_subwindow_point_sets_with_keys(
+    df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    features: list[str] = REFLECTION_FEATURES,
+    sub_n: int = 5,
+    range_sc_mode: str = "broadcast",
+) -> tuple[list[np.ndarray], np.ndarray, pd.DataFrame]:
+    """Per-step counterpart of build_scan_point_sets_with_keys: instead of one scan's own
+    points, pools the last sub_n scans' points (stride=1, same track, same windowing as
+    deepreflecs_track_accumulation.build_windowed_point_sets) for every scan, and also
+    returns each pooled set's target-scan identity (INSTANCE_COLS), needed to reassemble
+    a per-scan embedding sequence for the GRU afterward."""
+    class_to_idx = {cls: i for i, cls in enumerate(classes)}
+    mask = df["group"].isin(classes)
+    filtered = df.loc[mask]
+
+    feat_matrix = filtered[features].to_numpy(dtype="float32")
+    class_idx = filtered["group"].map(class_to_idx).to_numpy()
+    range_sc_values = filtered["range_sc"].to_numpy(dtype="float32")
+    range_col = features.index("range_sc")
+
+    scan_positions = filtered.groupby(INSTANCE_COLS, sort=False).indices
+    scan_keys_list = list(scan_positions.keys())  # list index == _scan_idx below
+    scan_arrays = list(scan_positions.values())
+    scan_keys_df = pd.DataFrame(scan_keys_list, columns=INSTANCE_COLS)
+    scan_keys_df["_scan_idx"] = np.arange(len(scan_keys_df))
+    scan_keys_df = scan_keys_df.sort_values(TRACK_COLS + ["timestamp"])
+
+    point_sets, labels, keys = [], [], []
+    for _, track_scans in scan_keys_df.groupby(TRACK_COLS, sort=False):
+        ordered = track_scans["_scan_idx"].to_numpy()
+        for i in range(len(ordered)):
+            window_idx = ordered[max(0, i - sub_n + 1) : i + 1]
+            positions = np.concatenate([scan_arrays[j] for j in window_idx])
+            feats = feat_matrix[positions].copy()
+
+            target_idx = ordered[i]
+            target_positions = scan_arrays[target_idx]
+            if range_sc_mode == "broadcast":
+                feats[:, range_col] = range_sc_values[target_positions[0]]
+
+            point_sets.append(feats)
+            labels.append(class_idx[target_positions[0]])
+            keys.append(scan_keys_list[target_idx])
+
+    keys_df = pd.DataFrame(keys, columns=INSTANCE_COLS)
+    return point_sets, np.array(labels, dtype="int64"), keys_df
+
+
+def fit_subwindow_standardization(
+    df: pd.DataFrame, splits: dict[str, list[str]], sub_n: int,
+    classes: list[str] = MLP_CLASSES, features: list[str] = REFLECTION_FEATURES,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reproduces the exact per-feature mean/std the sub_n-scan pooled encoder was
+    trained with (deepreflecs_track_accumulation.prepare_windowed_split_point_sets_
+    ragged's convention: mean/std over all of train's real pooled points, no masking
+    needed since these lists are already ragged). Refit here rather than loaded from
+    disk, same discipline as fit_reflection_standardization."""
+    train_df = df.loc[df["sequence_name"].isin(splits["train"])]
+    train_sets, _, _ = build_subwindow_point_sets_with_keys(train_df, classes, features, sub_n)
+    all_points = np.concatenate(train_sets)
+    mean = all_points.mean(axis=0).astype("float32")
+    std = all_points.std(axis=0).astype("float32")
+    return mean, np.where(std > 0, std, 1.0).astype("float32")
+
+
+def compute_subwindow_scan_embeddings(
+    df: pd.DataFrame,
+    sub_n: int,
+    classes: list[str] = MLP_CLASSES,
+    features: list[str] = REFLECTION_FEATURES,
+    encoder_dir=None,
+    conv_dim: int = CONV_DIM,
+    point_dim: int = POINT_DIM,
+    splits: dict[str, list[str]] | None = None,
+    batch_size: int = 1024,
+    standardization_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Per-step counterpart of compute_scan_embeddings: instead of the frozen N=1
+    control, runs a frozen encoder trained end-to-end on sub_n-scan pooled sub-windows
+    (deepreflecs_track_accumulation.run_windowed_training_ragged(df, n=sub_n, ...)), so
+    every timestep the GRU consumes is built from sub_n scans' points instead of one."""
+    if splits is None:
+        splits = load_split()
+    if standardization_df is None:
+        standardization_df = df
+
+    model_path = encoder_dir / "deepreflecs_model.pt"
+    if not model_path.exists():
+        raise FileNotFoundError(f"{model_path} doesn't exist, train the sub_n={sub_n} pooled encoder first")
+
+    mean, std = fit_subwindow_standardization(standardization_df, splits, sub_n, classes, features)
+
+    point_sets, labels, keys_df = build_subwindow_point_sets_with_keys(df, classes, features, sub_n)
+    point_sets_std = [(p - mean) / std for p in point_sets]
+
+    model = DeepReflecs(len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.eval()
+
+    embeddings = []
+    with torch.no_grad():
+        for start in range(0, len(point_sets_std), batch_size):
+            batch_sets = point_sets_std[start : start + batch_size]
+            batch_m_max = max(p.shape[0] for p in batch_sets)
+            batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+            batch_x_t = torch.tensor(batch_x, device=DEVICE)
+            batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+            embeddings.append(embed_points(model, batch_x_t, batch_mask_t))
+    embeddings = torch.cat(embeddings, dim=0).cpu().numpy()
+
+    result = keys_df.copy()
+    result["label"] = labels
+    for i in range(embeddings.shape[1]):
+        result[f"e{i}"] = embeddings[:, i]
+    return result
+
+
+def get_or_compute_subwindow_scan_embeddings(df: pd.DataFrame, cache_path, **kwargs) -> pd.DataFrame:
+    """Same caching convention as get_or_compute_scan_embeddings."""
+    if cache_path.exists():
+        print(f"{cache_path} already exists, loading cached embeddings")
+        return pd.read_parquet(cache_path)
+    result = compute_subwindow_scan_embeddings(df, **kwargs)
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     result.to_parquet(cache_path)
     print(f"Saved {cache_path}")
@@ -591,6 +735,345 @@ def evaluate_gru_test_metrics(
         confusion_matrix_path=output_dir / "gru_test_confusion_matrix.png",
         metrics_bar_path=output_dir / "gru_test_precision_recall_f1.png",
         split_name=f"test (N={n}, stride={stride}, hidden_size={hidden_size})",
+    )
+
+
+# --- stateful GRU variant: same stride=1 windowing as DeepReflecsGRU, but the hidden
+# state is warm-started from the previous window's own h_n instead of zero-initialized
+# every window (see DeepReflecsGRU.forward). A track's information beyond the last N
+# scans is otherwise unconditionally discarded the moment it falls outside the window;
+# this lets it persist, decaying however much the GRU's own gates decide rather than
+# being hard-cut at exactly N scans. ---
+
+
+def build_track_windowed_embedding_sequences(
+    embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n: int = WINDOW_N, stride: int = STRIDE,
+) -> list[tuple[list[np.ndarray], np.ndarray]]:
+    """Same windowing as build_windowed_embedding_sequences, but keeps each track's own
+    windows grouped and in increasing-scan order instead of flattening everything into
+    one global list. Needed for train_gru_stateful, which carries the GRU's hidden
+    state from window i-1 into window i within the same track, a dependency the
+    flattened, order-erased output of build_windowed_embedding_sequences can't
+    express."""
+    embedding_cols = [c for c in embeddings_df.columns if c.startswith("e")]
+    ordered = embeddings_df.sort_values(TRACK_COLS + ["timestamp"]).reset_index(drop=True)
+    emb_matrix = ordered[embedding_cols].to_numpy(dtype="float32")
+    label_arr = ordered["label"].to_numpy()
+
+    tracks = []
+    for _, positions in ordered.groupby(TRACK_COLS, sort=False).indices.items():
+        seqs, labels = [], []
+        for i in range(0, len(positions), stride):
+            window_positions = positions[max(0, i - n + 1) : i + 1]
+            seqs.append(emb_matrix[window_positions])
+            labels.append(label_arr[window_positions[-1]])
+        tracks.append((seqs, np.array(labels, dtype="int64")))
+    return tracks
+
+
+def prepare_track_windowed_embedding_splits(
+    embeddings_df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    splits: dict[str, list[str]] | None = None,
+):
+    if splits is None:
+        splits = load_split()
+
+    train_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["train"])]
+    val_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["val"])]
+    test_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["test"])]
+
+    train_tracks = build_track_windowed_embedding_sequences(train_df, classes, n, stride)
+    val_tracks = build_track_windowed_embedding_sequences(val_df, classes, n, stride)
+    test_tracks = build_track_windowed_embedding_sequences(test_df, classes, n, stride)
+
+    n_train_windows = sum(len(seqs) for seqs, _ in train_tracks)
+    n_val_windows = sum(len(seqs) for seqs, _ in val_tracks)
+    n_test_windows = sum(len(seqs) for seqs, _ in test_tracks)
+    print(
+        f"N={n} stride={stride} (stateful): tracks train={len(train_tracks)} "
+        f"val={len(val_tracks)} test={len(test_tracks)}, windows train={n_train_windows} "
+        f"val={n_val_windows} test={n_test_windows}"
+    )
+    return train_tracks, val_tracks, test_tracks
+
+
+def _run_stateful_epoch(
+    tracks: list[tuple[list[np.ndarray], np.ndarray]],
+    model: DeepReflecsGRU,
+    n_lanes: int,
+    hidden_size: int,
+    num_layers: int,
+    optimizer: torch.optim.Optimizer | None = None,
+    criterion: nn.Module | None = None,
+    shuffle: bool = False,
+):
+    """Advances n_lanes tracks in lockstep, one window per lane per step, carrying each
+    lane's GRU hidden state (detached) from its own previous window into the next,
+    instead of the zero-initialized state every window gets in the plain GRU. A lane
+    whose track finishes is immediately refilled with the next queued track (hidden
+    state reset to zero for that lane only), so the batch stays n_lanes wide until the
+    whole split is exhausted, the standard "parallel stateful streams" pattern for
+    truncated-BPTT RNN training. Detaching h0 before handing it to the next window
+    keeps each step's backward pass scoped to that one window's own unroll, same cost
+    as the plain (non-stateful) GRU, only the starting state differs.
+
+    optimizer+criterion given -> training step; omitted -> inference only (criterion
+    still optional even then, only needed if a loss number is wanted)."""
+    train = optimizer is not None
+    order = np.random.permutation(len(tracks)) if shuffle else np.arange(len(tracks))
+    queue = iter(order.tolist())
+    embedding_dim = tracks[0][0][0].shape[1]
+    lanes: list[dict | None] = [None] * n_lanes
+
+    def refill(lane_i):
+        idx = next(queue, None)
+        if idx is None:
+            lanes[lane_i] = None
+            return
+        seqs, labels = tracks[idx]
+        lanes[lane_i] = {"seqs": seqs, "labels": labels, "pos": 0, "h": None}
+
+    for lane_i in range(n_lanes):
+        refill(lane_i)
+
+    total_loss, total_correct, total_count = 0.0, 0, 0
+    has_loss = criterion is not None
+    y_true_all, y_pred_all = [], []
+
+    while any(lane is not None for lane in lanes):
+        active = [i for i, lane in enumerate(lanes) if lane is not None]
+        batch_seqs = [lanes[i]["seqs"][lanes[i]["pos"]] for i in active]
+        batch_labels = np.array([lanes[i]["labels"][lanes[i]["pos"]] for i in active], dtype="int64")
+        batch_m_max = max(s.shape[0] for s in batch_seqs)
+        batch_x, batch_lengths = pad_sequences(batch_seqs, batch_m_max, embedding_dim)
+        batch_x_t = torch.tensor(batch_x, device=DEVICE)
+        batch_lengths_t = torch.tensor(batch_lengths)
+        batch_y_t = torch.tensor(batch_labels, device=DEVICE)
+
+        h0 = torch.cat(
+            [
+                lanes[i]["h"] if lanes[i]["h"] is not None else torch.zeros(num_layers, 1, hidden_size, device=DEVICE)
+                for i in active
+            ],
+            dim=1,
+        )
+        packed = nn.utils.rnn.pack_padded_sequence(batch_x_t, batch_lengths_t, batch_first=True, enforce_sorted=False)
+
+        if train:
+            _, h_n = model.gru(packed, h0)
+            logits = model.head(h_n[-1])
+            loss = criterion(logits, batch_y_t)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        else:
+            with torch.no_grad():
+                _, h_n = model.gru(packed, h0)
+                logits = model.head(h_n[-1])
+                loss = criterion(logits, batch_y_t) if has_loss else None
+
+        h_n = h_n.detach()
+        preds = logits.argmax(dim=1)
+        if has_loss:
+            total_loss += loss.item() * len(active)
+        total_correct += (preds == batch_y_t).sum().item()
+        total_count += len(active)
+        y_true_all.extend(batch_labels.tolist())
+        y_pred_all.extend(preds.detach().cpu().tolist())
+
+        for col, i in enumerate(active):
+            lanes[i]["h"] = h_n[:, col : col + 1, :]
+            lanes[i]["pos"] += 1
+            if lanes[i]["pos"] >= len(lanes[i]["seqs"]):
+                refill(i)
+
+    avg_loss = total_loss / total_count if has_loss else None
+    acc = total_correct / total_count
+    return avg_loss, acc, np.array(y_true_all), np.array(y_pred_all)
+
+
+def train_gru_stateful(
+    train_tracks: list[tuple[list[np.ndarray], np.ndarray]],
+    val_tracks: list[tuple[list[np.ndarray], np.ndarray]],
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+):
+    """Stateful counterpart of train_gru: n_lanes tracks advance in parallel (see
+    _run_stateful_epoch) instead of shuffling independent windows into minibatches,
+    since a window's hidden state now depends on its own track's previous window.
+    Keeps the same effective batch size (n_lanes) as the plain GRU's batch_size, so
+    Adam's gradient-noise characteristics stay comparable."""
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    y_train_all = np.concatenate([labels for _, labels in train_tracks])
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train_all]))
+    weight_tensor = torch.tensor(
+        [weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE
+    )
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
+
+    embedding_dim = train_tracks[0][0][0].shape[1]
+    model = DeepReflecsGRU(
+        embedding_dim, hidden_size=hidden_size, num_layers=num_layers, num_classes=len(classes),
+        mlp_hidden_dim=mlp_hidden_dim,
+    ).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+
+    history = []
+    for epoch in range(epochs):
+        model.train()
+        train_loss, train_acc, _, _ = _run_stateful_epoch(
+            train_tracks, model, n_lanes, hidden_size, num_layers,
+            optimizer=optimizer, criterion=criterion, shuffle=True,
+        )
+        model.eval()
+        _, val_acc, _, _ = _run_stateful_epoch(
+            val_tracks, model, n_lanes, hidden_size, num_layers,
+            optimizer=None, criterion=None, shuffle=False,
+        )
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}")
+
+    return model, history
+
+
+def run_gru_training_stateful(
+    embeddings_df: pd.DataFrame,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+    output_dir=None,
+    splits: dict[str, list[str]] | None = None,
+):
+    """Stateful counterpart of run_gru_training. Separate output_dir/cache filenames
+    from the plain GRU (gru_stateful_* instead of gru_*) so this never clobbers that
+    comparison point; run_multiscan_pipeline-style callers can run both against the
+    same embeddings_df side by side."""
+    if output_dir is None:
+        output_dir = RNN_DIR / f"N{n}_stride{stride}_gru_stateful_h{hidden_size}"
+    if splits is None:
+        splits = load_split()
+
+    cache_key = {
+        "n": n, "stride": stride, "classes": classes, "splits": splits, "hidden_size": hidden_size,
+        "num_layers": num_layers, "mlp_hidden_dim": mlp_hidden_dim, "epochs": epochs, "n_lanes": n_lanes,
+        "lr": lr, "random_state": random_state,
+    }
+    history_cache = output_dir / "gru_stateful_training_history.json"
+    model_cache = output_dir / "gru_stateful_model.pt"
+
+    train_tracks, val_tracks, test_tracks = prepare_track_windowed_embedding_splits(
+        embeddings_df, classes=classes, n=n, stride=stride, splits=splits,
+    )
+    embedding_dim = train_tracks[0][0][0].shape[1]
+
+    if history_cache.exists() and model_cache.exists():
+        cached = json.loads(history_cache.read_text())
+        if cached.get("key") == cache_key:
+            print(f"{history_cache} already matches this config, loading cached model + history")
+            model = DeepReflecsGRU(
+                embedding_dim, hidden_size=hidden_size, num_layers=num_layers, num_classes=len(classes),
+                mlp_hidden_dim=mlp_hidden_dim,
+            ).to(DEVICE)
+            model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+            plot_training_curves(cached["history"], output_dir=output_dir)
+            return model, cached["history"], test_tracks
+        print(f"{history_cache} doesn't match this config, retraining")
+
+    model, history = train_gru_stateful(
+        train_tracks, val_tracks, classes=classes, epochs=epochs, n_lanes=n_lanes, lr=lr,
+        random_state=random_state, hidden_size=hidden_size, num_layers=num_layers, mlp_hidden_dim=mlp_hidden_dim,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    history_cache.write_text(json.dumps({"key": cache_key, "history": history}, indent=2))
+    torch.save(model.state_dict(), model_cache)
+    print(f"Saved {history_cache} and {model_cache}")
+
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, test_tracks
+
+
+def _evaluate_gru_stateful_metrics(y_true, y_pred, classes, metrics_cache, confusion_matrix_path, metrics_bar_path, split_name):
+    from sklearn.metrics import ConfusionMatrixDisplay, confusion_matrix, precision_recall_fscore_support
+
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true, y_pred, labels=range(len(classes)), zero_division=0
+    )
+    metrics_df = pd.DataFrame({"precision": precision, "recall": recall, "f1": f1, "support": support}, index=classes)
+    metrics_cache.parent.mkdir(parents=True, exist_ok=True)
+    metrics_df.to_json(metrics_cache, orient="index", indent=2)
+    print(f"Saved {metrics_cache}")
+    print(f"per-class precision/recall/f1 ({split_name}):")
+    print(metrics_df.round(3).to_string())
+
+    import matplotlib.pyplot as plt
+
+    cm = confusion_matrix(y_true, y_pred, labels=range(len(classes)), normalize="true")
+    fig, ax = plt.subplots(figsize=(7, 6))
+    ConfusionMatrixDisplay(cm, display_labels=classes).plot(ax=ax, colorbar=False, values_format=".2f")
+    ax.set_title(f"DeepReflecs+GRU (stateful): {split_name} confusion matrix (row-normalized)")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    fig.tight_layout()
+    confusion_matrix_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(confusion_matrix_path, dpi=150)
+    print(f"Saved {confusion_matrix_path}")
+
+    bar_fig, bar_ax = plt.subplots(figsize=(9, 5))
+    metrics_df[["precision", "recall", "f1"]].plot(kind="bar", ax=bar_ax, edgecolor="k")
+    bar_ax.set_ylim(0, 1)
+    bar_ax.set_ylabel("score")
+    bar_ax.set_title(f"DeepReflecs+GRU (stateful): per-class precision/recall/f1 ({split_name})")
+    bar_ax.legend(loc="lower right")
+    plt.setp(bar_ax.get_xticklabels(), rotation=45, ha="right")
+    bar_fig.tight_layout()
+    bar_fig.savefig(metrics_bar_path, dpi=150)
+    print(f"Saved {metrics_bar_path}")
+
+    return metrics_df, fig, bar_fig
+
+
+def evaluate_gru_stateful_test_metrics(
+    model: DeepReflecsGRU,
+    test_tracks: list[tuple[list[np.ndarray], np.ndarray]],
+    classes: list[str] = MLP_CLASSES,
+    output_dir=None,
+    n: int = WINDOW_N,
+    stride: int = STRIDE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    n_lanes: int = 256,
+):
+    if output_dir is None:
+        output_dir = RNN_DIR / f"N{n}_stride{stride}_gru_stateful_h{hidden_size}"
+    model.eval()
+    _, _, y_true, y_pred = _run_stateful_epoch(
+        test_tracks, model, n_lanes, hidden_size, num_layers, optimizer=None, criterion=None, shuffle=False,
+    )
+    return _evaluate_gru_stateful_metrics(
+        y_true, y_pred, classes,
+        metrics_cache=output_dir / "gru_stateful_test_metrics.json",
+        confusion_matrix_path=output_dir / "gru_stateful_test_confusion_matrix.png",
+        metrics_bar_path=output_dir / "gru_stateful_test_precision_recall_f1.png",
+        split_name=f"test (N={n}, stride={stride}, hidden_size={hidden_size}, stateful)",
     )
 
 
@@ -1329,7 +1812,7 @@ def compute_pooled_embeddings(
     df: pd.DataFrame, split_sequences: list[str], mean: np.ndarray, std: np.ndarray,
     classes: list[str] = MLP_CLASSES, features: list[str] = REFLECTION_FEATURES, n: int = WINDOW_N,
     stride: int = STRIDE, range_sc_mode: str = "broadcast", encoder_dir=POOLED_ENCODER_DIR,
-    conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM, batch_size: int = 1024,
+    conv_dim: int = CONV_DIM, point_dim: int = POINT_DIM, pooling: str = "max", batch_size: int = 1024,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Runs the already-trained, frozen pooled N=10 DeepReflecs encoder on one split's
     windows (all N scans' points concatenated per window, same as that model's own
@@ -1346,7 +1829,9 @@ def compute_pooled_embeddings(
     point_sets, labels = build_pooled_point_sets(split_df, classes, features, n, stride, range_sc_mode)
     point_sets_std = [(p - mean) / std for p in point_sets]
 
-    model = DeepReflecs(len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model = DeepReflecs(
+        len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+    ).to(DEVICE)
     model.load_state_dict(torch.load(encoder_dir / "deepreflecs_model.pt", map_location=DEVICE))
     model.eval()
 
@@ -1448,7 +1933,7 @@ def _prepare_fusion_splits_core(
 def prepare_fusion_splits(
     df: pd.DataFrame, embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES, n: int = WINDOW_N,
     stride: int = STRIDE, splits: dict[str, list[str]] | None = None, range_sc_mode: str = "broadcast",
-    pooled_encoder_dir=POOLED_ENCODER_DIR, gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
+    pooled_encoder_dir=POOLED_ENCODER_DIR, pooling: str = "max", gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
     gru_num_layers: int = GRU_LAYERS,
 ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """Builds [pooled_embedding ; gru_hidden_state] per window for each split (pooled
@@ -1461,7 +1946,7 @@ def prepare_fusion_splits(
     mean, std = fit_pooled_standardization(df, splits, classes, REFLECTION_FEATURES, n, stride, range_sc_mode)
     branch_fn = functools.partial(
         compute_pooled_embeddings, df, mean=mean, std=std, classes=classes, features=REFLECTION_FEATURES,
-        n=n, stride=stride, range_sc_mode=range_sc_mode, encoder_dir=pooled_encoder_dir,
+        n=n, stride=stride, range_sc_mode=range_sc_mode, encoder_dir=pooled_encoder_dir, pooling=pooling,
     )
     return _prepare_fusion_splits_core(
         embeddings_df, splits, branch_fn, "pooled", classes, n, stride, gru_model_dir, gru_hidden_size,
@@ -1628,7 +2113,7 @@ def run_fusion_training(
     df: pd.DataFrame, embeddings_df: pd.DataFrame, n: int = WINDOW_N, stride: int = STRIDE,
     classes: list[str] = MLP_CLASSES, epochs: int = EPOCHS, batch_size: int = BATCH_SIZE, lr: float = LEARNING_RATE,
     random_state: int = RANDOM_STATE, hidden_dim: int = FUSION_MLP_HIDDEN_DIM, n_hidden_layers: int = 2,
-    pooled_encoder_dir=POOLED_ENCODER_DIR, gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
+    pooled_encoder_dir=POOLED_ENCODER_DIR, pooling: str = "max", gru_model_dir=None, gru_hidden_size: int = HIDDEN_SIZE,
     gru_num_layers: int = GRU_LAYERS, output_dir=None, splits: dict[str, list[str]] | None = None,
 ):
     if gru_model_dir is None:
@@ -1640,8 +2125,8 @@ def run_fusion_training(
 
     splits_data = prepare_fusion_splits(
         df, embeddings_df, classes, n, stride, splits,
-        pooled_encoder_dir=pooled_encoder_dir, gru_model_dir=gru_model_dir, gru_hidden_size=gru_hidden_size,
-        gru_num_layers=gru_num_layers,
+        pooled_encoder_dir=pooled_encoder_dir, pooling=pooling, gru_model_dir=gru_model_dir,
+        gru_hidden_size=gru_hidden_size, gru_num_layers=gru_num_layers,
     )
     return _run_fusion_training_core(
         splits_data, classes, epochs, batch_size, lr, random_state, hidden_dim, n_hidden_layers, output_dir,

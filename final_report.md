@@ -302,6 +302,370 @@ display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/
 alone, no new architecture. Weakest class is still `two_wheeler` (F1 0.813), but
 every class improved substantially over Section 2's single-scan numbers (Figure 6).
 
+Why pooling helps even on a near-static track: at ~2.9 points per scan, which scatterers cross the CFAR threshold is dominated by speckle (coherent fading), not just the object's geometry, so consecutive scans give largely independent noisy draws of the same object rather than redundant copies. Pooling N of them is variance reduction on the detection process (more points per class-defining statistic), plus some genuine aspect-angle diversity from ego/relative motion; this report can't cleanly separate how much each contributes.
+
+One specific confusion drops a lot: two_wheeler misclassified as pedestrian falls from 8% (single scan) to 3% (pooled N=20), consistent with pooling resolving the two classes' overlapping point-count/RCS regime rather than just raising two_wheeler's overall recall uniformly.
+
+
+```python
+import sys
+sys.path.insert(0, "/home/bruno/radar_machine_learning_ws/scripts")
+import numpy as np
+import pandas as pd
+import torch
+from build_points_table import build_and_save_points_table
+from mlp_classifier import apply_mlp_class_groups
+from feature_distributions import MLP_CLASSES
+from deepreflecs_classifier import DEVICE, DeepReflecs, REFLECTION_FEATURES
+from deepreflecs_track_accumulation import (
+    POINTS_TABLE_SEQ_ALLSENSORS_PATH, add_relative_features_seq,
+    prepare_windowed_split_point_sets_ragged, _predict_in_batches_ragged, load_split,
+)
+from mlp_track_accumulation import build_windowed_temporal_features, TEMPORAL_FEATURES
+
+df_cm = build_and_save_points_table(table_path=POINTS_TABLE_SEQ_ALLSENSORS_PATH, sensor_id=None)
+df_cm = add_relative_features_seq(df_cm)
+df_cm = apply_mlp_class_groups(df_cm)
+
+_, _, _, _, test_sets, y_test, mean_cm, std_cm = prepare_windowed_split_point_sets_ragged(df_cm, n=20)
+
+model_cm = DeepReflecs(len(REFLECTION_FEATURES), num_classes=len(MLP_CLASSES)).to(DEVICE)
+model_cm.load_state_dict(torch.load(RESULTS / "track_accumulation/N20_stride1_allsensors/deepreflecs_model.pt", map_location=DEVICE))
+
+test_std = [(s - mean_cm) / std_cm for s in test_sets]
+y_pred_cm = _predict_in_batches_ragged(model_cm, test_std).argmax(dim=1).cpu().numpy()
+
+# scan-to-scan RCS/velocity dynamics: reuse the project's own build_windowed_temporal_
+# features (median per scan, diffed consecutively, normalized by real elapsed time),
+# rather than re-deriving it. An earlier version of this analysis computed "dynamics"
+# as a point-to-point diff over the raw pooled point array, which mixes within-scan
+# spatial variation with across-scan temporal change and is confounded by point count;
+# this is the correct, already-established method, and it changes the large_vehicle
+# conclusion below (see note).
+splits_cm = load_split()
+test_df_cm = df_cm.loc[df_cm["sequence_name"].isin(splits_cm["test"])]
+temporal_feats_cm = build_windowed_temporal_features(test_df_cm, classes=MLP_CLASSES, n=20, stride=1)
+rcs_var_col, vr_var_col = TEMPORAL_FEATURES.index("rcs"), TEMPORAL_FEATURES.index("vr_compensated")
+
+idx_tw, idx_ped = MLP_CLASSES.index("two_wheeler"), MLP_CLASSES.index("pedestrian")
+mask_confused = (y_test == idx_tw) & (y_pred_cm == idx_ped)
+mask_tw_correct = (y_test == idx_tw) & (y_pred_cm == idx_tw)
+mask_ped_true = y_test == idx_ped
+
+
+def window_stats(mask, label):
+    idxs = np.where(mask)[0]
+    sets = [test_sets[i] for i in idxs]
+    n_points = np.array([s.shape[0] for s in sets])
+    extent_x = np.array([np.ptp(s[:, 0]) for s in sets])
+    extent_y = np.array([np.ptp(s[:, 1]) for s in sets])
+    diagonal = np.sqrt(extent_x**2 + extent_y**2)
+    rcs_mean = np.array([s[:, 2].mean() for s in sets])
+    vr_mean = np.array([s[:, 3].mean() for s in sets])
+    doppler_spread = np.array([s[:, 3].std() for s in sets])
+    rcs_variation = temporal_feats_cm[idxs, rcs_var_col]
+    vr_variation = temporal_feats_cm[idxs, vr_var_col]
+    return {
+        "group": label, "n_windows": len(sets),
+        "points/window (median)": np.median(n_points),
+        "diagonal length (median)": np.median(diagonal),
+        "RCS mean (median)": np.median(rcs_mean),
+        "Doppler spread (median)": np.median(doppler_spread),
+        "vr_compensated mean (median)": np.median(vr_mean),
+        "RCS temporal variation (median)": np.median(rcs_variation),
+        "vr temporal variation (median)": np.median(vr_variation),
+    }
+
+
+summary = pd.DataFrame([
+    window_stats(mask_confused, "two_wheeler -> pedestrian (confused, 3%)"),
+    window_stats(mask_tw_correct, "two_wheeler -> two_wheeler (correct)"),
+    window_stats(mask_ped_true, "pedestrian (true)"),
+]).set_index("group").round(3)
+summary
+```
+
+    /home/bruno/radar_machine_learning_ws/results/data/points_table_seq_allsensors.parquet already covers exactly the requested sequences, skipping build
+
+
+    N=20 stride=1 range_sc_mode=broadcast (ragged): windows train=871367 val=173781 test=178765, global m_max would have been 788 (never padded to it)
+
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>n_windows</th>
+      <th>points/window (median)</th>
+      <th>diagonal length (median)</th>
+      <th>RCS mean (median)</th>
+      <th>Doppler spread (median)</th>
+      <th>vr_compensated mean (median)</th>
+      <th>RCS temporal variation (median)</th>
+      <th>vr temporal variation (median)</th>
+    </tr>
+    <tr>
+      <th>group</th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>two_wheeler -&gt; pedestrian (confused, 3%)</th>
+      <td>345</td>
+      <td>25.0</td>
+      <td>1.058</td>
+      <td>-7.509</td>
+      <td>0.344</td>
+      <td>-0.141</td>
+      <td>94.712997</td>
+      <td>3.637</td>
+    </tr>
+    <tr>
+      <th>two_wheeler -&gt; two_wheeler (correct)</th>
+      <td>10136</td>
+      <td>51.0</td>
+      <td>1.776</td>
+      <td>-11.033</td>
+      <td>0.521</td>
+      <td>2.087</td>
+      <td>117.640999</td>
+      <td>6.298</td>
+    </tr>
+    <tr>
+      <th>pedestrian (true)</th>
+      <td>35091</td>
+      <td>33.0</td>
+      <td>0.742</td>
+      <td>-8.523</td>
+      <td>0.408</td>
+      <td>0.408</td>
+      <td>88.578003</td>
+      <td>4.508</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+**Why the remaining 3% (Figure 6).** The 345 confused windows are two_wheeler's sparse, slow tail: half the points of a correctly classified two_wheeler window, a spatial extent shrunk toward pedestrian's, and a velocity of -0.14 m/s median (a correctly classified two_wheeler moves at +2.09 m/s) indistinguishable from a walking pedestrian's +0.41 m/s.
+
+Scan-to-scan dynamics (median per scan, diffed consecutively, normalized by real elapsed time, the project's own established `build_windowed_temporal_features`) confirm this isn't just a snapshot effect: vr temporal variation is 3.64 for confused windows vs. 4.51 for true pedestrian and 6.30 for correct two_wheeler, confused is still the quietest group scan-to-scan, not just at a single instant. RCS temporal variation is 94.7 for confused, close to true pedestrian's 88.6 and well below correct two_wheeler's 117.6. So the floor here holds on both axes once measured correctly: a genuinely stationary bike/rider (stopped, feet down) rather than just slow motion, consistent with the large_vehicle/car and pedestrian/pedestrian_group confusions discussed next for the fusion model (Figure 9).
+
+*(An earlier pass at this computed "dynamics" as a point-to-point diff across the raw pooled point array, which mixes within-scan spatial variation with across-scan temporal change and is confounded by point count. The velocity conclusion above happens to survive that error; the large_vehicle/car case below does not, see its note.)*
+
+
+```python
+idx_lv, idx_car = MLP_CLASSES.index("large_vehicle"), MLP_CLASSES.index("car")
+mask_confused_lv = (y_test == idx_lv) & (y_pred_cm == idx_car)
+mask_lv_correct = (y_test == idx_lv) & (y_pred_cm == idx_lv)
+mask_car_true = y_test == idx_car
+
+
+def window_stats_full(mask, label):
+    idxs = np.where(mask)[0]
+    sets = [test_sets[i] for i in idxs]
+    n_points = np.array([s.shape[0] for s in sets])
+    extent_x = np.array([np.ptp(s[:, 0]) for s in sets])
+    extent_y = np.array([np.ptp(s[:, 1]) for s in sets])
+    diagonal = np.sqrt(extent_x**2 + extent_y**2)
+    rcs_mean = np.array([s[:, 2].mean() for s in sets])
+    doppler_spread = np.array([s[:, 3].std() for s in sets])
+    range_mean = np.array([s[:, 4].mean() for s in sets])
+    rcs_variation = temporal_feats_cm[idxs, rcs_var_col]
+    vr_variation = temporal_feats_cm[idxs, vr_var_col]
+    return {
+        "group": label, "n_windows": len(sets),
+        "points/window (median)": np.median(n_points),
+        "diagonal length (median)": np.median(diagonal),
+        "RCS mean (median)": np.median(rcs_mean),
+        "Doppler spread (median)": np.median(doppler_spread),
+        "range (median)": np.median(range_mean),
+        "RCS temporal variation (median)": np.median(rcs_variation),
+        "vr temporal variation (median)": np.median(vr_variation),
+    }
+
+
+summary_lv = pd.DataFrame([
+    window_stats_full(mask_confused_lv, "large_vehicle -> car (confused, 15%)"),
+    window_stats_full(mask_lv_correct, "large_vehicle -> large_vehicle (correct)"),
+    window_stats_full(mask_car_true, "car (true)"),
+]).set_index("group").round(3)
+summary_lv
+```
+
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>n_windows</th>
+      <th>points/window (median)</th>
+      <th>diagonal length (median)</th>
+      <th>RCS mean (median)</th>
+      <th>Doppler spread (median)</th>
+      <th>range (median)</th>
+      <th>RCS temporal variation (median)</th>
+      <th>vr temporal variation (median)</th>
+    </tr>
+    <tr>
+      <th>group</th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>large_vehicle -&gt; car (confused, 15%)</th>
+      <td>2411</td>
+      <td>38.0</td>
+      <td>3.280</td>
+      <td>2.332</td>
+      <td>0.285</td>
+      <td>36.188999</td>
+      <td>172.057999</td>
+      <td>1.855</td>
+    </tr>
+    <tr>
+      <th>large_vehicle -&gt; large_vehicle (correct)</th>
+      <td>12943</td>
+      <td>164.0</td>
+      <td>13.650</td>
+      <td>2.502</td>
+      <td>2.539</td>
+      <td>26.879999</td>
+      <td>128.529999</td>
+      <td>1.025</td>
+    </tr>
+    <tr>
+      <th>car (true)</th>
+      <td>76572</td>
+      <td>48.0</td>
+      <td>4.289</td>
+      <td>-0.554</td>
+      <td>1.489</td>
+      <td>34.763000</td>
+      <td>145.945007</td>
+      <td>4.077</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+
+**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect, not a labeling issue.
+
+Scan-to-scan dynamics, computed correctly (median per scan, diffed consecutively, normalized by real elapsed time), do not tell a clean "converges toward car" story the way extent and point count do. vr temporal variation for confused windows (1.85) sits between correct large_vehicle's low 1.03 and true car's much higher 4.08, closer to large_vehicle's own quiet end than to car's. RCS temporal variation for confused windows (172.1) is actually the *highest* of the three groups, above both correct large_vehicle (128.5) and true car (145.9). That is a genuinely unresolved finding, not one this analysis has an explanation for: confused windows keep large_vehicle-like low velocity dynamics while showing unusually elevated RCS variation, neither converging toward car nor staying flat like large_vehicle.
+
+*(This specific stat went through three computation methods before landing here, a raw per-window sum confounded by point count, then a point-to-point diff mixing within-scan and across-scan variation, both of which showed confused windows as uniformly "quieter than car." Neither survived the correct scan-median, elapsed-time-normalized computation above, which is the project's own established `build_windowed_temporal_features` method. Worth remembering as a caution about how fragile this kind of post-hoc point-cloud statistic is to exactly how it's aggregated.)*
+
+RCS mean (the level, not the scan-to-scan variation above) looked like a surviving cue at the median (2.33 confused vs. 2.50 correct large_vehicle vs. -0.55 car), but a median gap can look clean while the underlying distributions still overlap heavily, and that turns out to be exactly what happens here (next cell).
+
+
+```python
+from sklearn.metrics import roc_auc_score
+import matplotlib.pyplot as plt
+
+rcs_confused = np.array([test_sets[i][:, 2].mean() for i in np.where(mask_confused_lv)[0]])
+rcs_car = np.array([test_sets[i][:, 2].mean() for i in np.where(mask_car_true)[0]])
+dop_confused = np.array([test_sets[i][:, 3].std() for i in np.where(mask_confused_lv)[0]])
+dop_car = np.array([test_sets[i][:, 3].std() for i in np.where(mask_car_true)[0]])
+
+
+def auc_and_overlap(a, b):
+    labels = np.concatenate([np.ones(len(a)), np.zeros(len(b))])
+    scores = np.concatenate([a, b])
+    auc = roc_auc_score(labels, scores)
+    auc = max(auc, 1 - auc)
+    lo, hi = np.percentile(b, 10), np.percentile(b, 90)
+    overlap = ((a >= lo) & (a <= hi)).mean()
+    return auc, overlap
+
+
+rcs_auc, rcs_overlap = auc_and_overlap(rcs_confused, rcs_car)
+dop_auc, dop_overlap = auc_and_overlap(dop_confused, dop_car)
+print(f"RCS mean: single-feature AUC={rcs_auc:.3f}, {rcs_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
+print(f"Doppler spread: single-feature AUC={dop_auc:.3f}, {dop_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+axes[0].hist(rcs_car, bins=40, alpha=0.5, density=True, label="true car")
+axes[0].hist(rcs_confused, bins=40, alpha=0.5, density=True, label="large_vehicle -> car (confused)")
+axes[0].set_xlabel("RCS mean (window)")
+axes[0].set_title(f"RCS mean, AUC={rcs_auc:.2f}")
+axes[0].legend()
+
+axes[1].hist(dop_car, bins=40, alpha=0.5, density=True, label="true car")
+axes[1].hist(dop_confused, bins=40, alpha=0.5, density=True, label="large_vehicle -> car (confused)")
+axes[1].set_xlabel("Doppler spread (std of vr)")
+axes[1].set_title(f"Doppler spread, AUC={dop_auc:.2f}")
+axes[1].legend()
+
+fig.tight_layout()
+plt.show()
+```
+
+    RCS mean: single-feature AUC=0.624, 88% of confused windows fall inside true car's own 10-90pct range
+    Doppler spread: single-feature AUC=0.651, 87% of confused windows fall inside true car's own 10-90pct range
+
+
+
+    
+![png](results/final_report/final_report_22_1.png)
+    
+
+
+**Checking whether RCS was actually usable, not just different at the median.** A median gap can look clean while the underlying distributions still overlap heavily. There is also a separate architecture question: DeepReflecs never computes "mean RCS of the window" as a feature, it takes a max-pool over a learned per-point transform, so even a genuinely separable RCS signal in the mean or lower tail could be invisible to whatever extreme value max-pooling happens to grab. A capacity/data issue compounds this further: this sparse (38-point), range-degraded large_vehicle regime is a small minority of large_vehicle's training examples (median window is 164 points), so the model may never have seen enough "sparse large_vehicle, still high RCS" examples to learn to lean on it even if the rule would work.
+
+Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. The honest read is not "the model missed an available cue," it's that RCS was never as separable here as the summary statistic made it look; extent, point count, and velocity dynamics converging toward car-like is the real story, and there isn't a clean untapped cue left to exploit for this specific confusion.
+
 ## 5. Sequence model: GRU, and fusion with the pooled view
 
 A frozen, already-trained DeepReflecs encoder reduces each scan to one embedding
@@ -379,7 +743,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_19_0.png)
+![png](results/final_report/final_report_25_0.png)
     
 
 
@@ -479,7 +843,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_22_0.png)
+![png](results/final_report/final_report_28_0.png)
     
 
 
@@ -525,7 +889,7 @@ display(Image(filename=str(RESULTS / "track_accumulation_rnn/N20_stride1_fusion_
 
 
     
-![png](results/final_report/final_report_24_1.png)
+![png](results/final_report/final_report_30_1.png)
     
 
 
@@ -553,6 +917,9 @@ Everything below is single-split, not fold-validated: a proper 6-fold sweep at t
 | End-to-end fine-tuning (warmstart) of either the pooled encoder or the GRU's own per-scan encoder, at N=20 all-sensor | Both land *below* their frozen baselines (-0.0029, -0.0017) | An already-good frozen encoder already sits near this task's ceiling; the one N=10 sensor2-only warmstart win doesn't generalize to this scale |
 | Post-hoc probability smoothing (causal, along a track) on the fusion model's output | Small positive: +0.0013 (moving average, K=5) to +0.0031 (IIR low-pass, same span) | Free accuracy at inference time, not a training-time fix |
 | Other sequence-mixing architectures (Transformer, a selective state-space model, point-level self-attention), same frozen per-scan embeddings | All land inside the same ~0.86 to 0.89 macro F1 band as GRU/fusion | The bottleneck is upstream of which sequence-mixing mechanism is used, not solved by trying a different one |
+| Persistent GRU hidden state: warm-started from the previous stride=1 window's own h_n instead of zero-initialized every window, N=20 all-sensor | -0.0540 vs. the plain (zero-init) GRU, the largest regression in this table | Helps nothing for stable-identity classes (`car`, `two_wheeler` unaffected) and actively hurts `pedestrian`/`pedestrian_group` (-0.14, -0.12 F1): those two are an instantaneous point-density judgment, not a persistent identity, and carried memory makes the model slower to update when that judgment should be re-made fresh every window |
+| Richer per-step input: each GRU timestep's embedding built from a sub_n=5-scan pooled sub-window (its own encoder trained end-to-end on that pooled input) instead of a single scan, N=20 all-sensor | 0.8893, -0.0002 vs. the plain (N=1 per-step) GRU, flat per class too | The GRU's own 20-step recurrence over single-scan embeddings already recovers what a 5-scan pre-pooled embedding would add per step; pre-aggregating before the GRU is redundant with what its recurrence already extracts |
+| Wider embedding (point_dim 32 to 128), same sparse input, tested both where it was never carried forward: the N=20 pooled baseline, and the GRU's own per-scan embeddings | Pooled: 0.8702, +0.0089 over the 0.8613 baseline. GRU: 0.8867, -0.0028 vs. the 0.8895 baseline | Wider capacity helps when there's a lot of raw information to represent (the N=20 pooled branch has hundreds of points); it doesn't help the GRU's input pipeline, where the bottleneck was never encoder capacity, the GRU's own 20-step integration already saturates whatever a per-scan embedding offers |
 
 All models/architectures GRU, GRU h=128, Transformer d=32, Mamba, point-level self-attention, all trained on the same frozen per-scan embeddings, land within 0.86 to 0.89 macro F1 of each other, a 0.03 spread. End-to-end fine-tuning of the encoder itself (warmstart) moved the number by −0.0017 to −0.0029. By contrast, the two changes made upstream of any sequence model, pooling scans instead of classifying one (0.7370 → 0.8613, +0.1243) and adding a GRU over per-scan embeddings at all (+0.0282), are 10 to 50x larger than anything gained or lost by changing the sequence-mixing mechanism itself. Given a fixed frozen per-scan embedding, no downstream architecture choice tested here moves macro F1 by more than ~0.003; the embedding itself, not the mechanism consuming it, is the binding constraint on further gains.
 
@@ -572,11 +939,7 @@ same answer, further gains there are not where the remaining headroom is.
 2. **Error overlap analysis.** Cross-reference the fusion model's misclassified
    tracks against GRU alone and the other architectures tried. If the same tracks
    are wrong everywhere, the ceiling is in the data/labels, not any one model.
-3. **Manual inspection of the confusion matrix**, especially `large_vehicle` predicted as
-   `car` and `pedestrian` vs. `pedestrian_group`, directly against the raw point
-   clouds and RadarScenes ground truth, since both read as plausibly ambiguous even
-   to a human annotator.
-4. **Question the frozen per-scan embedding itself.** Every sequence model shares the
+3. **Question the frozen per-scan embedding itself.** Every sequence model shares the
    same frozen DeepReflecs per-scan encoder as input; if that encoder is the actual
    bottleneck, no amount of downstream sequence-mixing sophistication will move the
    number.

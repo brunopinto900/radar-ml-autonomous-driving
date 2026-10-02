@@ -270,6 +270,7 @@ def train_deepreflecs_ragged(
     random_state: int = RANDOM_STATE,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
 ):
     """Ragged counterpart of deepreflecs_classifier.train_deepreflecs: never builds one
     dense (n_windows, m_max, n_features) array for a whole split, pads fresh per
@@ -285,7 +286,9 @@ def train_deepreflecs_ragged(
     )
     print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
 
-    model = DeepReflecs(n_features, num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model = DeepReflecs(
+        n_features, num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+    ).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = torch.nn.CrossEntropyLoss(weight=weight_tensor)
 
@@ -345,6 +348,7 @@ def run_windowed_training_ragged(
     splits: dict[str, list[str]] | None = None,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
 ):
     """Ragged counterpart of run_windowed_training: same output_dir/artifact naming
     (deepreflecs_model.pt etc.), so anything downstream that loads an already-trained
@@ -365,6 +369,7 @@ def run_windowed_training_ragged(
     model, history = train_deepreflecs_ragged(
         train_sets, y_train, val_sets, y_val, mean, std, classes=classes, epochs=epochs,
         batch_size=batch_size, lr=lr, random_state=random_state, conv_dim=conv_dim, point_dim=point_dim,
+        pooling=pooling,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -440,6 +445,7 @@ def run_windowed_training(
     standardize: bool = True,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
 ):
     """Windowed counterpart of deepreflecs_classifier.run_training: builds train/val/
     test windowed point sets, trains (or loads from cache if this exact config was
@@ -456,7 +462,7 @@ def run_windowed_training(
     cache_key = {
         "n": n, "stride": stride, "range_sc_mode": range_sc_mode, "classes": classes, "splits": splits,
         "features": features, "standardize": standardize, "conv_dim": conv_dim, "point_dim": point_dim,
-        "epochs": epochs, "batch_size": batch_size, "lr": lr, "random_state": random_state,
+        "pooling": pooling, "epochs": epochs, "batch_size": batch_size, "lr": lr, "random_state": random_state,
     }
     history_cache = output_dir / "deepreflecs_training_history.json"
     model_cache = output_dir / "deepreflecs_model.pt"
@@ -472,7 +478,9 @@ def run_windowed_training(
         cached = json.loads(history_cache.read_text())
         if cached.get("key") == cache_key:
             print(f"{history_cache} already matches this config, loading cached model + history")
-            model = DeepReflecs(len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+            model = DeepReflecs(
+                len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+            ).to(DEVICE)
             model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
             plot_training_curves(cached["history"], output_dir=output_dir)
             return model, cached["history"], X_test, mask_test, y_test
@@ -481,6 +489,7 @@ def run_windowed_training(
     model, history = train_deepreflecs(
         X_train, mask_train, y_train, X_val, mask_val, y_val, classes=classes, epochs=epochs,
         batch_size=batch_size, lr=lr, random_state=random_state, conv_dim=conv_dim, point_dim=point_dim,
+        pooling=pooling,
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -504,6 +513,7 @@ def evaluate_windowed_test_metrics(
     standardize: bool = True,
     conv_dim: int = CONV_DIM,
     point_dim: int = POINT_DIM,
+    pooling: str = "max",
 ):
     """The one and only time test should be touched for a given (n, stride, range_sc_
     mode) config, same rule as deepreflecs_classifier.evaluate_test_metrics."""
@@ -518,7 +528,9 @@ def evaluate_windowed_test_metrics(
         df, classes=classes, features=features, n=n, stride=stride, range_sc_mode=range_sc_mode,
         splits=splits, standardize=standardize,
     )
-    model = DeepReflecs(len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim).to(DEVICE)
+    model = DeepReflecs(
+        len(features), num_classes=len(classes), conv_dim=conv_dim, point_dim=point_dim, pooling=pooling,
+    ).to(DEVICE)
     model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
 
     return _evaluate_metrics(
