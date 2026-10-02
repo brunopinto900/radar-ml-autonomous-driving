@@ -29,6 +29,8 @@ numbers is backed by a validated experiment, see "Where to start reading" below.
 
 ![Fusion model confusion matrix, N=20 all sensors](results/track_accumulation_rnn/N20_stride1_fusion_pooled_gru64_allsensors/fusion_test_confusion_matrix.png)
 
+![Fusion model live predictions, sequence 107](results/sequence_107_fusion_predictions.gif)
+
 Full writeup, single-scan through multi-scan, with confusion-matrix interpretation
 and ablations: `final_report.md` (renders directly on GitHub) or `notebooks/final_report.ipynb`.
 

@@ -26,6 +26,7 @@ results/fold_stability/*
 results/class_imbalance/*
 !results/class_imbalance/class_counts_merged.png
 !results/radarscenes_sensor_layout.png
+!results/sequence_107_fusion_predictions.gif
 !results/deepreflecs/
 results/deepreflecs/*
 !results/deepreflecs/deepreflecs_confusion_matrix.png
