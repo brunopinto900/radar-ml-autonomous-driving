@@ -666,6 +666,383 @@ plt.show()
 
 Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. The honest read is not "the model missed an available cue," it's that RCS was never as separable here as the summary statistic made it look; extent, point count, and velocity dynamics converging toward car-like is the real story, and there isn't a clean untapped cue left to exploit for this specific confusion.
 
+
+```python
+from mlp_track_accumulation import build_windowed_diff_vector_features
+from taxonomy_separability import INSTANCE_COLS
+from deepreflecs_track_accumulation import TRACK_COLS
+
+# Patent-inspired tracker features (Aptiv US 12,013,919 B2: variance of velocity,
+# variance of heading direction, absolute curvature): same windows, same two
+# confusions, same AUC/overlap diagnostic as the RCS/Doppler check above.
+mask_tw = test_df_cm["group"].isin(MLP_CLASSES)
+filtered_tw = test_df_cm.loc[mask_tw]
+scan_positions = filtered_tw.groupby(INSTANCE_COLS, sort=False).indices
+scan_keys = pd.DataFrame(list(scan_positions.keys()), columns=INSTANCE_COLS)
+scan_keys["_scan_idx"] = np.arange(len(scan_keys))
+scan_keys = scan_keys.sort_values(TRACK_COLS + ["timestamp"])
+centroid = filtered_tw.groupby(INSTANCE_COLS, sort=False)[["x_cc", "y_cc"]].mean()
+
+keys = []
+for _, track_scans in scan_keys.groupby(TRACK_COLS, sort=False):
+    ordered = track_scans[["sequence_name", "track_id", "timestamp", "_scan_idx"]].to_numpy()
+    for i in range(0, len(ordered), 1):
+        keys.append(ordered[max(0, i - 20 + 1): i + 1])
+assert len(keys) == len(y_test)
+
+
+def heading_curvature(window_rows):
+    positions = np.array([centroid.loc[(seq, ts, trk)].to_numpy() for seq, trk, ts, _ in window_rows])
+    if len(positions) < 2:
+        return np.nan, np.nan
+    diffs = np.diff(positions, axis=0)
+    dist = np.linalg.norm(diffs, axis=1)
+    valid = dist > 1e-6
+    if valid.sum() < 1:
+        return np.nan, np.nan
+    headings = np.arctan2(diffs[valid, 1], diffs[valid, 0])
+    if len(headings) < 2:
+        return np.nan, np.nan
+    R = np.sqrt(np.mean(np.cos(headings)) ** 2 + np.mean(np.sin(headings)) ** 2)
+    heading_var = 1 - R
+    dtheta = np.abs(np.diff(headings))
+    dtheta = np.minimum(dtheta, 2 * np.pi - dtheta)
+    step_dist = dist[valid][1:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        local_curv = np.where(step_dist > 1e-6, dtheta / step_dist, np.nan)
+    return heading_var, np.nanmean(local_curv)
+
+
+heading_vars = np.full(len(keys), np.nan)
+curvatures = np.full(len(keys), np.nan)
+for i, window_rows in enumerate(keys):
+    heading_vars[i], curvatures[i] = heading_curvature(window_rows)
+
+scan_medians_2 = np.stack([np.median(filtered_tw[TEMPORAL_FEATURES].to_numpy()[pos], axis=0) for pos in scan_positions.values()])
+var_rows, diff_var_rows, diff_mean_rows = [], [], []
+for window_rows in keys:
+    idxs = window_rows[:, 3].astype(int)
+    medians = scan_medians_2[idxs]
+    var_rows.append(np.var(medians, axis=0) if len(idxs) > 1 else np.zeros(2))
+    if len(idxs) > 2:
+        d = np.diff(medians, axis=0)
+        diff_var_rows.append(np.var(d, axis=0))
+        diff_mean_rows.append(np.mean(d, axis=0))
+    else:
+        diff_var_rows.append(np.full(2, np.nan))
+        diff_mean_rows.append(np.full(2, np.nan))
+scan_median_var = np.array(var_rows)
+diff_var = np.array(diff_var_rows)
+diff_mean = np.array(diff_mean_rows)
+
+features = {
+    "heading variance": heading_vars,
+    "curvature": curvatures,
+    "RCS variance": scan_median_var[:, 0],
+    "velocity variance": scan_median_var[:, 1],
+    "RCS signed-diff variance (oscillation)": diff_var[:, 0],
+    "velocity signed-diff variance (oscillation)": diff_var[:, 1],
+    "RCS signed-diff mean (drift)": diff_mean[:, 0],
+    "velocity signed-diff mean (drift)": diff_mean[:, 1],
+}
+
+
+def auc_overlap(a, b):
+    a, b = a[~np.isnan(a)], b[~np.isnan(b)]
+    labels = np.concatenate([np.ones(len(a)), np.zeros(len(b))])
+    scores = np.concatenate([a, b])
+    auc = roc_auc_score(labels, scores)
+    auc = max(auc, 1 - auc)
+    lo, hi = np.percentile(b, 10), np.percentile(b, 90)
+    overlap = ((a >= lo) & (a <= hi)).mean()
+    return np.median(a), np.median(b), auc, overlap
+
+
+rows_tw, rows_lv = [], []
+for name, values in features.items():
+    med_c, med_ped, auc_ped, ov_ped = auc_overlap(values[mask_confused], values[mask_ped_true])
+    _, med_tw, auc_tw, ov_tw = auc_overlap(values[mask_confused], values[mask_tw_correct])
+    rows_tw.append([name, med_c, med_ped, auc_ped, med_tw, auc_tw])
+
+    med_c, med_car, auc_car, ov_car = auc_overlap(values[mask_confused_lv], values[mask_car_true])
+    _, med_lv, auc_lv, ov_lv = auc_overlap(values[mask_confused_lv], values[mask_lv_correct])
+    rows_lv.append([name, med_c, med_car, auc_car, med_lv, auc_lv])
+
+cols = ["feature", "confused (median)", "true target (median)", "AUC vs true target",
+        "correct source (median)", "AUC vs correct source"]
+temporal_study_tw = pd.DataFrame(rows_tw, columns=cols).round(3)
+temporal_study_lv = pd.DataFrame(rows_lv, columns=cols).round(3)
+print("two_wheeler -> pedestrian")
+display(temporal_study_tw)
+print("large_vehicle -> car")
+display(temporal_study_lv)
+```
+
+    two_wheeler -> pedestrian
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>feature</th>
+      <th>confused (median)</th>
+      <th>true target (median)</th>
+      <th>AUC vs true target</th>
+      <th>correct source (median)</th>
+      <th>AUC vs correct source</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>heading variance</td>
+      <td>0.582</td>
+      <td>0.689</td>
+      <td>0.584</td>
+      <td>0.793</td>
+      <td>0.696</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>curvature</td>
+      <td>6.700</td>
+      <td>10.497</td>
+      <td>0.743</td>
+      <td>7.689</td>
+      <td>0.606</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>RCS variance</td>
+      <td>22.692</td>
+      <td>16.142</td>
+      <td>0.636</td>
+      <td>14.865</td>
+      <td>0.663</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>velocity variance</td>
+      <td>0.097</td>
+      <td>0.068</td>
+      <td>0.531</td>
+      <td>0.067</td>
+      <td>0.509</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>RCS signed-diff variance (oscillation)</td>
+      <td>37.263</td>
+      <td>31.178</td>
+      <td>0.604</td>
+      <td>30.082</td>
+      <td>0.619</td>
+    </tr>
+    <tr>
+      <th>5</th>
+      <td>velocity signed-diff variance (oscillation)</td>
+      <td>0.064</td>
+      <td>0.100</td>
+      <td>0.587</td>
+      <td>0.089</td>
+      <td>0.578</td>
+    </tr>
+    <tr>
+      <th>6</th>
+      <td>RCS signed-diff mean (drift)</td>
+      <td>0.027</td>
+      <td>-0.000</td>
+      <td>0.529</td>
+      <td>-0.008</td>
+      <td>0.533</td>
+    </tr>
+    <tr>
+      <th>7</th>
+      <td>velocity signed-diff mean (drift)</td>
+      <td>-0.004</td>
+      <td>0.003</td>
+      <td>0.537</td>
+      <td>-0.001</td>
+      <td>0.507</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+    large_vehicle -> car
+
+
+
+<div>
+<style scoped>
+    .dataframe tbody tr th:only-of-type {
+        vertical-align: middle;
+    }
+
+    .dataframe tbody tr th {
+        vertical-align: top;
+    }
+
+    .dataframe thead th {
+        text-align: right;
+    }
+</style>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th></th>
+      <th>feature</th>
+      <th>confused (median)</th>
+      <th>true target (median)</th>
+      <th>AUC vs true target</th>
+      <th>correct source (median)</th>
+      <th>AUC vs correct source</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <th>0</th>
+      <td>heading variance</td>
+      <td>0.860</td>
+      <td>0.791</td>
+      <td>0.604</td>
+      <td>0.904</td>
+      <td>0.604</td>
+    </tr>
+    <tr>
+      <th>1</th>
+      <td>curvature</td>
+      <td>3.507</td>
+      <td>2.709</td>
+      <td>0.628</td>
+      <td>2.098</td>
+      <td>0.782</td>
+    </tr>
+    <tr>
+      <th>2</th>
+      <td>RCS variance</td>
+      <td>26.292</td>
+      <td>26.449</td>
+      <td>0.507</td>
+      <td>14.769</td>
+      <td>0.702</td>
+    </tr>
+    <tr>
+      <th>3</th>
+      <td>velocity variance</td>
+      <td>0.015</td>
+      <td>0.121</td>
+      <td>0.657</td>
+      <td>0.019</td>
+      <td>0.507</td>
+    </tr>
+    <tr>
+      <th>4</th>
+      <td>RCS signed-diff variance (oscillation)</td>
+      <td>59.289</td>
+      <td>54.923</td>
+      <td>0.520</td>
+      <td>34.261</td>
+      <td>0.674</td>
+    </tr>
+    <tr>
+      <th>5</th>
+      <td>velocity signed-diff variance (oscillation)</td>
+      <td>0.007</td>
+      <td>0.050</td>
+      <td>0.595</td>
+      <td>0.001</td>
+      <td>0.646</td>
+    </tr>
+    <tr>
+      <th>6</th>
+      <td>RCS signed-diff mean (drift)</td>
+      <td>0.011</td>
+      <td>-0.023</td>
+      <td>0.517</td>
+      <td>-0.010</td>
+      <td>0.515</td>
+    </tr>
+    <tr>
+      <th>7</th>
+      <td>velocity signed-diff mean (drift)</td>
+      <td>0.002</td>
+      <td>0.004</td>
+      <td>0.532</td>
+      <td>0.002</td>
+      <td>0.505</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+
+**Patent-inspired tracker features: does either confusion have a usable temporal cue left?**
+
+Checked 8 scan-to-scan dynamics features against both confusions, inspired by Aptiv's
+US 12,013,919 B2 ("Method for Classifying a Tracked Object"), which fuses a point-set
+branch with a separate tracker-feature branch (variance of velocity, variance of heading
+direction, absolute curvature, among others) before a GRU. Same AUC/overlap diagnostic as
+the RCS mean / Doppler spread check above, applied per-feature, per-confusion, before
+building anything:
+
+- **heading variance**: `1 - R` where `R = sqrt(mean(cos(heading))^2 + mean(sin(heading))^2)`
+  over the window's per-scan centroid headings (circular variance, handles wraparound).
+- **curvature**: mean of `|Δheading| / step_distance` between consecutive scans.
+- **RCS / velocity variance**: variance of each scan's own median RCS / vr_compensated
+  across the window (spread of the raw level, not a diff).
+- **RCS / velocity signed-diff variance ("oscillation")**: variance of the *signed*
+  scan-to-scan diffs of those same per-scan medians, high if the value swings up and down
+  even when the net change is zero.
+- **RCS / velocity signed-diff mean ("drift")**: mean of the same signed diffs, the net
+  directional trend over the window.
+
+Heading/curvature use each scan's centroid position (mean x_cc, y_cc); there's no real
+Kalman tracker state in this pipeline to pull a smoothed heading from, so this is a cheap
+proxy, not the patent's actual tracker-filtered feature.
+
+| feature | tw->ped confused | true pedestrian | AUC vs ped | correct two_wheeler | AUC vs tw | lv->car confused | true car | AUC vs car | correct large_vehicle | AUC vs lv |
+|---|---|---|---|---|---|---|---|---|---|---|
+| heading variance | 0.582 | 0.689 | 0.584 | 0.793 | 0.696 | 0.860 | 0.791 | 0.604 | 0.904 | 0.604 |
+| curvature | 6.700 | 10.497 | 0.743 | 7.690 | 0.606 | 3.507 | 2.709 | 0.628 | 2.098 | **0.782** |
+| RCS variance | 22.69 | 16.14 | 0.636 | 14.87 | 0.663 | 26.29 | 26.45 | 0.507 | 14.77 | 0.702 |
+| velocity variance | 0.097 | 0.068 | 0.532 | 0.067 | 0.509 | 0.015 | 0.121 | 0.657 | 0.019 | 0.507 |
+| RCS diff variance (oscillation) | 37.26 | 31.18 | 0.604 | 30.08 | 0.619 | 59.29 | 54.92 | 0.520 | 34.26 | 0.674 |
+| velocity diff variance (oscillation) | 0.064 | 0.100 | 0.587 | 0.089 | 0.578 | 0.007 | 0.050 | 0.595 | 0.001 | 0.646 |
+| RCS diff mean (drift) | 0.027 | -0.000 | 0.530 | -0.008 | 0.533 | 0.011 | -0.023 | 0.517 | -0.010 | 0.515 |
+| velocity diff mean (drift) | -0.004 | 0.003 | 0.537 | -0.001 | 0.507 | 0.002 | 0.004 | 0.532 | 0.002 | 0.505 |
+
+Drift carries no signal anywhere, every AUC is 0.50-0.54, noise floor. Every feature that
+separates at all separates the confused group from its *own* correct class better than from
+the class it gets mistaken for (curvature 0.782 vs. correct large_vehicle but only 0.628 vs.
+true car; heading variance 0.696 vs. correct two_wheeler but only 0.584 vs. true pedestrian),
+the same asymmetry the RCS-mean check found: these confused windows read as atypical for
+their own true class, not as typical examples of the predicted class. No single feature
+clears ~0.78; curvature vs. correct large_vehicle is the strongest result in the table.
+
+Taken together with the RCS mean / Doppler spread check earlier, none of these cues clear
+the bar of a clean, usable signal on their own. This is the main evidence against a temporal
+encoder branch for these two confusions specifically: curvature is the one feature that shows
+a real, if moderate, effect, everything else here looks like noise or a floor-vs-reference
+artifact rather than exploitable structure.
+
 ## 5. Sequence model: GRU, and fusion with the pooled view
 
 A frozen, already-trained DeepReflecs encoder reduces each scan to one embedding
@@ -743,7 +1120,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_25_0.png)
+![png](results/final_report/final_report_27_0.png)
     
 
 
@@ -843,7 +1220,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_28_0.png)
+![png](results/final_report/final_report_30_0.png)
     
 
 
@@ -889,7 +1266,7 @@ display(Image(filename=str(RESULTS / "track_accumulation_rnn/N20_stride1_fusion_
 
 
     
-![png](results/final_report/final_report_30_1.png)
+![png](results/final_report/final_report_32_1.png)
     
 
 
@@ -939,7 +1316,51 @@ same answer, further gains there are not where the remaining headroom is.
 2. **Error overlap analysis.** Cross-reference the fusion model's misclassified
    tracks against GRU alone and the other architectures tried. If the same tracks
    are wrong everywhere, the ceiling is in the data/labels, not any one model.
-3. **Question the frozen per-scan embedding itself.** Every sequence model shares the
+3. **Manual inspection of the confusion matrix**, especially `large_vehicle` predicted as
+   `car` and `pedestrian` vs. `pedestrian_group`, directly against the raw point
+   clouds and RadarScenes ground truth, since both read as plausibly ambiguous even
+   to a human annotator.
+4. **Question the frozen per-scan embedding itself.** Every sequence model shares the
    same frozen DeepReflecs per-scan encoder as input; if that encoder is the actual
    bottleneck, no amount of downstream sequence-mixing sophistication will move the
    number.
+
+## Appendix: training parameters (baseline: Fusion, pooled DeepReflecs + GRU h=64)
+
+Fusion concatenates two independently-trained, frozen branches, then trains a new head
+on the concatenation: the pooled encoder (Section 4) is a from-scratch DeepReflecs run
+on N=20-pooled point sets; the GRU branch runs a separately-trained, frozen N=1
+single-scan DeepReflecs encoder once per scan (precomputed, cached, never re-run per
+window despite scan-to-scan overlap), then trains a GRU over that frozen sequence of
+embeddings. Only the small fusion head (concat -> MLP) is trained against the
+concatenation; neither encoder nor the GRU receives gradients from fusion-head training.
+
+| | |
+|---|---|
+| Optimizer | Adam (every stage) |
+| Learning rate | 4e-5 (every stage) |
+| Batch size | 128 (every stage) |
+| Epochs | 100 (every stage, no early stopping/checkpoint restoration, final epoch used) |
+| Loss | Cross-entropy, class-weighted (`max_count / count_i`) |
+| Pipeline stages | 4, fully decoupled, no joint backprop across stages: (1) N=1 single-scan DeepReflecs encoder, trained once; (2) N=20 pooled DeepReflecs encoder (Section 4 baseline), trained once, separately; (3) GRU (1 layer, hidden_size=64) trained on (1)'s frozen per-scan embeddings; (4) fusion head (MLP, hidden_dim=16, 2 hidden layers) trained on concat(frozen (2)'s pooled embedding, frozen (3)'s GRU hidden state) |
+| Frozen vs. trained | At fusion-head training time, both the pooled encoder and the GRU are fully frozen (loaded from their own checkpoints); only the new MLP head trains |
+| Batching / OOM avoidance | Ragged everywhere a point set or sequence is involved: padded fresh per mini-batch only, never a dense whole-split array (same discipline project-wide); the fusion head itself needs no padding, both branches already reduce to one fixed-length vector per window |
+| Window counts | train 871,367 / val 173,781 / test 178,765 (N=20, stride 1, all sensors) |
+| Standardization | Train-split statistics only, fit separately per encoder (the N=1 encoder's stats differ from the N=20 pooled encoder's) |
+| Hardware | Single GPU (CUDA) |
+
+**Next step, not yet promoted to the main result: a temporal-fusion GRU.** Before
+committing to a full training run, a cheap diagnostic came first: 8 patent-inspired
+scan-to-scan features (heading variance, curvature, RCS/velocity variance, oscillation,
+drift) were checked for single-feature AUC against this report's own two main
+confusions, all topped out around 0.78, weak on their own. A joint check, the same 8
+features through a shallow, 5-fold cross-validated gradient-boosted-tree classifier,
+found much stronger separability (0.78-0.92 AUC), which is what justified the real
+training run rather than skipping it on the weak univariate signal. Result: a new
+per-scan temporal encoder (6 raw scan-to-scan scalars, trained end-to-end) fused with
+the frozen pooled embedding, feeding a newly-trained GRU, scored 0.8938 macro F1
+(best-val-accuracy checkpoint restored), ahead of fusion's 0.8897. Not yet promoted to
+the headline result: the gap is inside this project's own "under roughly a point, call
+it a tie without fold validation" bar, and GRU/fusion above weren't trained with the
+same best-checkpoint convention, so the comparison isn't apples-to-apples yet.
+Fold-validating both under matching conventions is the next step before deciding.
