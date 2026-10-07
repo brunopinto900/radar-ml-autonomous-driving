@@ -1077,6 +1077,319 @@ def evaluate_gru_stateful_test_metrics(
     )
 
 
+# --- single-scan stateful variant: same idea as the stateful GRU above (hidden state
+# carried across steps instead of reset to zero), but with the window-replay removed.
+# Each step feeds exactly one new scan's embedding; h0 is the previous step's h_n. No
+# window, no N, no pack_padded_sequence (every step's input length is always 1), and no
+# redundant re-presentation of scans the carried hidden state already encodes, unlike
+# train_gru_stateful above, which still replays the full N-scan window every step on
+# top of carrying h0 (a track's last N-1 scans get seen twice: once folded into h0,
+# once again raw). This is the single mechanism change isolated on its own, to find out
+# whether train_gru_stateful's regression (0.8355 vs 0.8895 macro F1, N=20 all-sensor)
+# was caused by that double-counting rather than by carrying state being a bad idea in
+# general. ---
+
+
+def build_track_scan_sequences(
+    embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-track (embeddings, labels) pairs, full track length, no windowing at all:
+    every scan is both an input step and its own labeled target. Unlike
+    build_track_windowed_embedding_sequences, nothing here ever gets sliced or
+    dropped for being older than N scans, since there is no N."""
+    embedding_cols = [c for c in embeddings_df.columns if c.startswith("e")]
+    ordered = embeddings_df.sort_values(TRACK_COLS + ["timestamp"]).reset_index(drop=True)
+    emb_matrix = ordered[embedding_cols].to_numpy(dtype="float32")
+    label_arr = ordered["label"].to_numpy()
+
+    tracks = []
+    for _, positions in ordered.groupby(TRACK_COLS, sort=False).indices.items():
+        tracks.append((emb_matrix[positions], label_arr[positions]))
+    return tracks
+
+
+def prepare_track_scan_splits(
+    embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES, splits: dict[str, list[str]] | None = None,
+):
+    if splits is None:
+        splits = load_split()
+
+    train_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["train"])]
+    val_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["val"])]
+    test_df = embeddings_df.loc[embeddings_df["sequence_name"].isin(splits["test"])]
+
+    train_tracks = build_track_scan_sequences(train_df, classes)
+    val_tracks = build_track_scan_sequences(val_df, classes)
+    test_tracks = build_track_scan_sequences(test_df, classes)
+
+    n_train_scans = sum(len(labels) for _, labels in train_tracks)
+    n_val_scans = sum(len(labels) for _, labels in val_tracks)
+    n_test_scans = sum(len(labels) for _, labels in test_tracks)
+    print(
+        f"single-scan stateful: tracks train={len(train_tracks)} val={len(val_tracks)} "
+        f"test={len(test_tracks)}, scans train={n_train_scans} val={n_val_scans} test={n_test_scans}"
+    )
+    return train_tracks, val_tracks, test_tracks
+
+
+def _run_single_scan_stateful_epoch(
+    tracks: list[tuple[np.ndarray, np.ndarray]],
+    model: DeepReflecsGRU,
+    n_lanes: int,
+    hidden_size: int,
+    num_layers: int,
+    optimizer: torch.optim.Optimizer | None = None,
+    criterion: nn.Module | None = None,
+    shuffle: bool = False,
+    trunc_len: int = 1,
+):
+    """Same n_lanes-parallel-tracks pattern as _run_stateful_epoch, but each step
+    advances every active lane by exactly one scan (no window, no pack_padded_sequence:
+    every lane's input length is always 1, so there's nothing ragged to pack). h is
+    carried from each lane's own previous step into its next; a lane whose track ends
+    is refilled with the next queued track and its h reset to zero, same discipline as
+    _run_stateful_epoch.
+
+    trunc_len: truncated-BPTT chunk length. trunc_len=1 (default) detaches h and
+    backprops after every single step, trunc_len=k lets gradients flow back through
+    up to k consecutive steps before backward+detach, same chunked-TBPTT pattern used
+    for training long RNN sequences generally, here applied per-lane (lanes advance
+    independently so a chunk boundary doesn't require tracks to align)."""
+    train = optimizer is not None
+    order = np.random.permutation(len(tracks)) if shuffle else np.arange(len(tracks))
+    queue = iter(order.tolist())
+    embedding_dim = tracks[0][0].shape[1]
+    lanes: list[dict | None] = [None] * n_lanes
+
+    def refill(lane_i):
+        idx = next(queue, None)
+        if idx is None:
+            lanes[lane_i] = None
+            return
+        seq, labels = tracks[idx]
+        lanes[lane_i] = {"seq": seq, "labels": labels, "pos": 0, "h": None}
+
+    for lane_i in range(n_lanes):
+        refill(lane_i)
+
+    total_loss, total_correct, total_count = 0.0, 0, 0
+    has_loss = criterion is not None
+    y_true_all, y_pred_all = [], []
+
+    # chunked TBPTT: h stays attached to the graph across up to trunc_len consecutive
+    # steps (gradients flow back that far), backward+step happens once per chunk, then
+    # h is detached, same "forward every step, backward every trunc_len steps" pattern
+    # as standard truncated-BPTT RNN training, trunc_len=1 reproduces the original
+    # per-step detach exactly.
+    chunk_loss = None
+    chunk_steps = 0
+
+    while any(lane is not None for lane in lanes):
+        active = [i for i, lane in enumerate(lanes) if lane is not None]
+        batch_x = np.stack([lanes[i]["seq"][lanes[i]["pos"]] for i in active])  # (B, embedding_dim)
+        batch_labels = np.array([lanes[i]["labels"][lanes[i]["pos"]] for i in active], dtype="int64")
+        batch_x_t = torch.tensor(batch_x, device=DEVICE).unsqueeze(1)  # (B, 1, embedding_dim): one scan, one step
+        batch_y_t = torch.tensor(batch_labels, device=DEVICE)
+
+        h0 = torch.cat(
+            [
+                lanes[i]["h"] if lanes[i]["h"] is not None else torch.zeros(num_layers, 1, hidden_size, device=DEVICE)
+                for i in active
+            ],
+            dim=1,
+        )
+
+        if train:
+            _, h_n = model.gru(batch_x_t, h0)
+            logits = model.head(h_n[-1])
+            step_loss = criterion(logits, batch_y_t)
+            chunk_loss = step_loss if chunk_loss is None else chunk_loss + step_loss
+            chunk_steps += 1
+            loss = step_loss
+        else:
+            with torch.no_grad():
+                _, h_n = model.gru(batch_x_t, h0)
+                logits = model.head(h_n[-1])
+                loss = criterion(logits, batch_y_t) if has_loss else None
+
+        preds = logits.argmax(dim=1)
+        if has_loss:
+            total_loss += loss.item() * len(active)
+        total_correct += (preds == batch_y_t).sum().item()
+        total_count += len(active)
+        y_true_all.extend(batch_labels.tolist())
+        y_pred_all.extend(preds.detach().cpu().tolist())
+
+        if train and chunk_steps >= trunc_len:
+            optimizer.zero_grad()
+            (chunk_loss / chunk_steps).backward()
+            optimizer.step()
+            chunk_loss, chunk_steps = None, 0
+            h_n = h_n.detach()
+        elif not train:
+            h_n = h_n.detach()
+        # else (train, mid-chunk): leave h_n attached so the next step's forward pass
+        # stays connected to this chunk's graph, backward hasn't happened yet
+
+        for col, i in enumerate(active):
+            lanes[i]["h"] = h_n[:, col : col + 1, :]
+            lanes[i]["pos"] += 1
+            if lanes[i]["pos"] >= len(lanes[i]["labels"]):
+                refill(i)
+
+    if train and chunk_steps > 0:
+        optimizer.zero_grad()
+        (chunk_loss / chunk_steps).backward()
+        optimizer.step()
+
+    avg_loss = total_loss / total_count if has_loss else None
+    acc = total_correct / total_count
+    return avg_loss, acc, np.array(y_true_all), np.array(y_pred_all)
+
+
+def train_gru_single_scan_stateful(
+    train_tracks: list[tuple[np.ndarray, np.ndarray]],
+    val_tracks: list[tuple[np.ndarray, np.ndarray]],
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+    trunc_len: int = 1,
+):
+    """Single-scan counterpart of train_gru_stateful: same n_lanes effective batch
+    size, same Adam/class-weighted-cross-entropy convention, only _run_single_scan_
+    stateful_epoch differs (one scan per step instead of a replayed window).
+
+    trunc_len: see _run_single_scan_stateful_epoch. 1 (default) matches the original
+    per-step-detach run (macro F1 0.8004, all-sensor); a longer value lets gradients
+    reach further back per chunk, the thing being tested here."""
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    y_train_all = np.concatenate([labels for _, labels in train_tracks])
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train_all]))
+    weight_tensor = torch.tensor(
+        [weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE
+    )
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
+
+    embedding_dim = train_tracks[0][0].shape[1]
+    model = DeepReflecsGRU(
+        embedding_dim, hidden_size=hidden_size, num_layers=num_layers, num_classes=len(classes),
+        mlp_hidden_dim=mlp_hidden_dim,
+    ).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+
+    history = []
+    for epoch in range(epochs):
+        model.train()
+        train_loss, train_acc, _, _ = _run_single_scan_stateful_epoch(
+            train_tracks, model, n_lanes, hidden_size, num_layers,
+            optimizer=optimizer, criterion=criterion, shuffle=True, trunc_len=trunc_len,
+        )
+        model.eval()
+        _, val_acc, _, _ = _run_single_scan_stateful_epoch(
+            val_tracks, model, n_lanes, hidden_size, num_layers,
+            optimizer=None, criterion=None, shuffle=False, trunc_len=trunc_len,
+        )
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}")
+
+    return model, history
+
+
+def run_gru_training_single_scan_stateful(
+    embeddings_df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+    trunc_len: int = 1,
+    output_dir=None,
+    splits: dict[str, list[str]] | None = None,
+):
+    """No n/stride in the output dir name or cache key: this variant has no window
+    size at all, memory length is whatever the gates learn, not a fixed parameter.
+    trunc_len is in both (distinct output dirs/caches per value), since it's a real
+    architectural/training knob, not incidental."""
+    if output_dir is None:
+        output_dir = RNN_DIR / f"single_scan_stateful_gru_h{hidden_size}_trunc{trunc_len}"
+    if splits is None:
+        splits = load_split()
+
+    cache_key = {
+        "classes": classes, "splits": splits, "hidden_size": hidden_size, "num_layers": num_layers,
+        "mlp_hidden_dim": mlp_hidden_dim, "epochs": epochs, "n_lanes": n_lanes, "lr": lr,
+        "random_state": random_state, "trunc_len": trunc_len,
+    }
+    history_cache = output_dir / "gru_single_scan_stateful_training_history.json"
+    model_cache = output_dir / "gru_single_scan_stateful_model.pt"
+
+    train_tracks, val_tracks, test_tracks = prepare_track_scan_splits(embeddings_df, classes=classes, splits=splits)
+    embedding_dim = train_tracks[0][0].shape[1]
+
+    if history_cache.exists() and model_cache.exists():
+        cached = json.loads(history_cache.read_text())
+        if cached.get("key") == cache_key:
+            print(f"{history_cache} already matches this config, loading cached model + history")
+            model = DeepReflecsGRU(
+                embedding_dim, hidden_size=hidden_size, num_layers=num_layers, num_classes=len(classes),
+                mlp_hidden_dim=mlp_hidden_dim,
+            ).to(DEVICE)
+            model.load_state_dict(torch.load(model_cache, map_location=DEVICE))
+            plot_training_curves(cached["history"], output_dir=output_dir)
+            return model, cached["history"], test_tracks
+        print(f"{history_cache} doesn't match this config, retraining")
+
+    model, history = train_gru_single_scan_stateful(
+        train_tracks, val_tracks, classes=classes, epochs=epochs, n_lanes=n_lanes, lr=lr,
+        random_state=random_state, hidden_size=hidden_size, num_layers=num_layers, mlp_hidden_dim=mlp_hidden_dim,
+        trunc_len=trunc_len,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    history_cache.write_text(json.dumps({"key": cache_key, "history": history}, indent=2))
+    torch.save(model.state_dict(), model_cache)
+    print(f"Saved {history_cache} and {model_cache}")
+
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, test_tracks
+
+
+def evaluate_gru_single_scan_stateful_test_metrics(
+    model: DeepReflecsGRU,
+    test_tracks: list[tuple[np.ndarray, np.ndarray]],
+    classes: list[str] = MLP_CLASSES,
+    output_dir=None,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    n_lanes: int = 256,
+    trunc_len: int = 1,
+):
+    if output_dir is None:
+        output_dir = RNN_DIR / f"single_scan_stateful_gru_h{hidden_size}_trunc{trunc_len}"
+    model.eval()
+    _, _, y_true, y_pred = _run_single_scan_stateful_epoch(
+        test_tracks, model, n_lanes, hidden_size, num_layers, optimizer=None, criterion=None, shuffle=False,
+    )
+    return _evaluate_gru_stateful_metrics(
+        y_true, y_pred, classes,
+        metrics_cache=output_dir / "gru_single_scan_stateful_test_metrics.json",
+        confusion_matrix_path=output_dir / "gru_single_scan_stateful_test_confusion_matrix.png",
+        metrics_bar_path=output_dir / "gru_single_scan_stateful_test_precision_recall_f1.png",
+        split_name=f"test (single-scan stateful, hidden_size={hidden_size})",
+    )
+
+
 # --- causal transformer variant: same precomputed embeddings/windowing as the GRU,
 # self-attention instead of recurrence over the FIFO buffer's sequence ---
 D_MODEL = 32  # == point_dim, no input projection needed

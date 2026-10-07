@@ -23,7 +23,7 @@ and `pedestrian`/`pedestrian_group` confuse each other in both directions (6.6% 
 vs. a small truck; one individual person vs. a group) rather than a model-specific
 weakness.
 
-![Multi-scan pipeline: FIFO buffer, DeepReflecs encoder, GRU](pipeline_overview.png)
+![Multi-scan pipeline: FIFO buffer, DeepReflecs encoder, GRU](../pipeline_overview.png)
 
 
 **Figure 1.** Multi-scan pipeline: per-track FIFO buffer feeding a frozen DeepReflecs encoder, whose per-scan embeddings drive a causal GRU.
@@ -36,7 +36,7 @@ real-world automotive radar dataset: 4 series-production radar sensors mounted o
 test vehicle, overlapping fields of view (Figure 2), point-level semantic labels
 propagated from camera-verified object tracks.
 
-![RadarScenes sensor layout, sensor 2 highlighted](results/radarscenes_sensor_layout.png)
+![RadarScenes sensor layout, sensor 2 highlighted](../results/radarscenes_sensor_layout.png)
 
 This project's taxonomy merges RadarScenes' own finer-grained labels into 5 classes
 (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`); `large_vehicle`
@@ -1283,7 +1283,51 @@ signatures, a large car and a small truck, or one person and a loose group, rath
 than a fixable model weakness: `car` is the class every `large_vehicle` error falls
 into, and the pedestrian/group confusion is symmetric, not a one-directional bias.
 
-## 6. Ablation studies
+## 6. Joint separability check: gradient-boosted trees, and the temporal-fusion GRU
+
+The univariate check above tested each of the 8 patent-inspired features alone, and
+none cleared ~0.78 AUC against either confusion. That rules out any single feature as a
+clean, usable signal on its own, but it doesn't rule out the features working together:
+a classifier combining several weak cues nonlinearly can separate classes that no
+single cue separates by itself. Before committing to a full architecture build, a
+cheap diagnostic tested that directly: all 8 features together, through a shallow
+gradient-boosted-tree classifier, 5-fold cross-validated, same two confusions
+(two_wheeler -> pedestrian, large_vehicle -> car).
+
+The joint check found real separability the univariate one missed: AUC in the 0.78-0.92
+range depending on the confusion, well above the ~0.78 ceiling any single feature hit
+alone. Feature importance was concentrated, not spread evenly: velocity variance,
+velocity oscillation, curvature, and RCS variance carried almost all of it, while the
+drift features (RCS drift, velocity drift) carried essentially none, consistent with
+the univariate table's own finding that drift sat at 0.50-0.54 AUC, the noise floor,
+on either confusion. That combination of results, weak alone but real jointly, with a
+plausible subset of features doing the actual work, was the justification for building
+a real architecture rather than stopping at the univariate read of "no usable temporal
+cue left."
+
+The architecture built on that basis is a temporal-fusion GRU: a new per-scan temporal
+encoder (6 raw scan-to-scan scalars: each scan's own RCS and compensated velocity,
+their signed diff from the previous scan, and the scan's centroid displacement dx/dy)
+feeds a small trainable MLP every timestep, fused with the frozen pooled DeepReflecs
+point embedding, into a freshly-initialized GRU (not the existing frozen one, since its
+input dimensionality changed and it was never trained on the temporal channel). The
+scan encoder, GRU, and classification head all train end-to-end; only the point
+encoder stays frozen. The raw features are intentionally the 6 minimal scalars, not
+the 8 window-level aggregates the gradient-boosted trees actually saw, variance and
+curvature are exactly the kind of running statistic a GRU is built to accumulate from
+a raw per-step diff sequence itself, so handing it the pre-aggregated versions directly
+would partly defeat the point of testing whether an end-to-end sequence model can
+learn them on its own.
+
+Result so far: 0.8938 macro F1 (best-val-accuracy checkpoint restored across training),
+ahead of fusion's 0.8897. Not yet promoted to this report's headline result: the gap is
+inside this project's own "under roughly a point, call it a tie without fold
+validation" bar, and the GRU/fusion results above were not trained with the same
+best-checkpoint convention, so the comparison isn't apples-to-apples yet.
+Fold-validating both under matching conventions is the next step before deciding
+whether this result is real.
+
+## 7. Ablation studies
 
 Everything below is single-split, not fold-validated: a proper 6-fold sweep at this scale takes roughly a full day of compute per configuration, not run here for every variant in this table.
 
@@ -1300,7 +1344,7 @@ Everything below is single-split, not fold-validated: a proper 6-fold sweep at t
 
 All models/architectures GRU, GRU h=128, Transformer d=32, Mamba, point-level self-attention, all trained on the same frozen per-scan embeddings, land within 0.86 to 0.89 macro F1 of each other, a 0.03 spread. End-to-end fine-tuning of the encoder itself (warmstart) moved the number by −0.0017 to −0.0029. By contrast, the two changes made upstream of any sequence model, pooling scans instead of classifying one (0.7370 → 0.8613, +0.1243) and adding a GRU over per-scan embeddings at all (+0.0282), are 10 to 50x larger than anything gained or lost by changing the sequence-mixing mechanism itself. Given a fixed frozen per-scan embedding, no downstream architecture choice tested here moves macro F1 by more than ~0.003; the embedding itself, not the mechanism consuming it, is the binding constraint on further gains.
 
-## 7. Conclusions and future work
+## 8. Conclusions and future work
 
 Multi-scan accumulation improved the performance significantly: pooling alone recovers most of the gap
 from the single-scan floor (0.7370 -> 0.8613), and a causal GRU plus fusion recovers
@@ -1335,32 +1379,21 @@ window despite scan-to-scan overlap), then trains a GRU over that frozen sequenc
 embeddings. Only the small fusion head (concat -> MLP) is trained against the
 concatenation; neither encoder nor the GRU receives gradients from fusion-head training.
 
-| | |
-|---|---|
-| Optimizer | Adam (every stage) |
-| Learning rate | 4e-5 (every stage) |
-| Batch size | 128 (every stage) |
-| Epochs | 100 (every stage, no early stopping/checkpoint restoration, final epoch used) |
-| Loss | Cross-entropy, class-weighted (`max_count / count_i`) |
-| Pipeline stages | 4, fully decoupled, no joint backprop across stages: (1) N=1 single-scan DeepReflecs encoder, trained once; (2) N=20 pooled DeepReflecs encoder (Section 4 baseline), trained once, separately; (3) GRU (1 layer, hidden_size=64) trained on (1)'s frozen per-scan embeddings; (4) fusion head (MLP, hidden_dim=16, 2 hidden layers) trained on concat(frozen (2)'s pooled embedding, frozen (3)'s GRU hidden state) |
-| Frozen vs. trained | At fusion-head training time, both the pooled encoder and the GRU are fully frozen (loaded from their own checkpoints); only the new MLP head trains |
-| Batching / OOM avoidance | Ragged everywhere a point set or sequence is involved: padded fresh per mini-batch only, never a dense whole-split array (same discipline project-wide); the fusion head itself needs no padding, both branches already reduce to one fixed-length vector per window |
-| Window counts | train 871,367 / val 173,781 / test 178,765 (N=20, stride 1, all sensors) |
-| Standardization | Train-split statistics only, fit separately per encoder (the N=1 encoder's stats differ from the N=20 pooled encoder's) |
-| Hardware | Single GPU (CUDA) |
-
-**Next step, not yet promoted to the main result: a temporal-fusion GRU.** Before
-committing to a full training run, a cheap diagnostic came first: 8 patent-inspired
-scan-to-scan features (heading variance, curvature, RCS/velocity variance, oscillation,
-drift) were checked for single-feature AUC against this report's own two main
-confusions, all topped out around 0.78, weak on their own. A joint check, the same 8
-features through a shallow, 5-fold cross-validated gradient-boosted-tree classifier,
-found much stronger separability (0.78-0.92 AUC), which is what justified the real
-training run rather than skipping it on the weak univariate signal. Result: a new
-per-scan temporal encoder (6 raw scan-to-scan scalars, trained end-to-end) fused with
-the frozen pooled embedding, feeding a newly-trained GRU, scored 0.8938 macro F1
-(best-val-accuracy checkpoint restored), ahead of fusion's 0.8897. Not yet promoted to
-the headline result: the gap is inside this project's own "under roughly a point, call
-it a tie without fold validation" bar, and GRU/fusion above weren't trained with the
-same best-checkpoint convention, so the comparison isn't apples-to-apples yet.
-Fold-validating both under matching conventions is the next step before deciding.
+The pipeline runs in four fully decoupled stages, no joint backprop across any of them:
+a N=1 single-scan DeepReflecs encoder trained once; a N=20 pooled DeepReflecs encoder
+(the Section 4 baseline) trained once, separately; a GRU (1 layer, hidden_size=64)
+trained on the first encoder's frozen per-scan embeddings; and a fusion head (a small
+MLP, hidden_dim=16, 2 hidden layers) trained on the concatenation of the pooled
+encoder's frozen embedding and the GRU's frozen final hidden state. By the time the
+fusion head trains, both the pooled encoder and the GRU are fully frozen, loaded from
+their own checkpoints, only the new MLP head updates. All four stages share the same
+optimizer and schedule: Adam, learning rate 4e-5, batch size 128, 100 epochs, no early
+stopping or checkpoint restoration (the final epoch's weights are used as-is), and the
+same class-weighted cross-entropy loss (`max_count / count_i`). Window counts: 871,367
+train, 173,781 val, 178,765 test (N=20, stride 1, all sensors). Standardization
+statistics are fit on the train split only, separately for each encoder, since the N=1
+encoder's stats differ from the N=20 pooled encoder's. Training ran on a single GPU
+(CUDA), and batching followed this project's usual ragged discipline throughout: any
+point set or embedding sequence is padded fresh per mini-batch only, never as one dense
+array for a whole split; the fusion head itself needs no padding at all, since both of
+its inputs are already fixed-length vectors by the time they reach it.
