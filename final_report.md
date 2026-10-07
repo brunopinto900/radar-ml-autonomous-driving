@@ -23,7 +23,7 @@ and `pedestrian`/`pedestrian_group` confuse each other in both directions (6.6% 
 vs. a small truck; one individual person vs. a group) rather than a model-specific
 weakness.
 
-![Multi-scan pipeline: FIFO buffer, DeepReflecs encoder, GRU](../pipeline_overview.png)
+![Multi-scan pipeline: FIFO buffer, DeepReflecs encoder, GRU](pipeline_overview.png)
 
 
 **Figure 1.** Multi-scan pipeline: per-track FIFO buffer feeding a frozen DeepReflecs encoder, whose per-scan embeddings drive a causal GRU.
@@ -36,7 +36,7 @@ real-world automotive radar dataset: 4 series-production radar sensors mounted o
 test vehicle, overlapping fields of view (Figure 2), point-level semantic labels
 propagated from camera-verified object tracks.
 
-![RadarScenes sensor layout, sensor 2 highlighted](../results/radarscenes_sensor_layout.png)
+![RadarScenes sensor layout, sensor 2 highlighted](results/radarscenes_sensor_layout.png)
 
 This project's taxonomy merges RadarScenes' own finer-grained labels into 5 classes
 (`car`, `large_vehicle`, `two_wheeler`, `pedestrian`, `pedestrian_group`); `large_vehicle`
