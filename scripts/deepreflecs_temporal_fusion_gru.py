@@ -300,6 +300,287 @@ def run_temporal_fusion_training(
     return model, history, test_seqs, y_test
 
 
+# --- single-scan stateful variant: same motivation as DeepReflecsGRU's single-scan
+# stateful line in deepreflecs_rnn_track_accumulation.py (O(1)-per-scan inference
+# instead of replaying up to N scans every step), applied here to see whether the
+# temporal-fusion architecture, which already carries a trainable per-scan encoder
+# on raw causal scan-to-scan diffs, recovers anything extra when that encoder's
+# output also gets to persist across scans via a carried GRU hidden state instead of
+# being rebuilt from a zeroed window every time. trunc_len is exposed the same way,
+# since trunc_len=1 regressed badly for the plain GRU and trunc_len=20 recovered
+# nearly all of it there; same chunked-TBPTT mechanism, same reason to expect the
+# same sensitivity here. ---
+
+
+def build_track_fused_scan_sequences(
+    combined_df: pd.DataFrame, point_cols: list[str], temporal_cols: list[str], classes: list[str] = MLP_CLASSES,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Per-track (features, labels) pairs, full track length, no windowing: fused
+    counterpart of deepreflecs_rnn_track_accumulation.build_track_scan_sequences,
+    each row is [point_embedding, raw_temporal] concatenated, same column order
+    build_windowed_fused_sequences already uses."""
+    ordered = combined_df.sort_values(TRACK_COLS + ["timestamp"]).reset_index(drop=True)
+    feat_matrix = ordered[point_cols + temporal_cols].to_numpy(dtype="float32")
+    label_arr = ordered["label"].to_numpy()
+
+    tracks = []
+    for _, positions in ordered.groupby(TRACK_COLS, sort=False).indices.items():
+        tracks.append((feat_matrix[positions], label_arr[positions]))
+    return tracks
+
+
+def prepare_fused_track_scan_splits(
+    df: pd.DataFrame, embeddings_df: pd.DataFrame, classes: list[str] = MLP_CLASSES,
+    splits: dict[str, list[str]] | None = None,
+):
+    if splits is None:
+        splits = load_split()
+
+    point_cols = [c for c in embeddings_df.columns if c.startswith("e")]
+    point_dim = len(point_cols)
+
+    temporal_raw = compute_scan_temporal_raw(df, classes)
+    mean, std = fit_temporal_standardization(temporal_raw, splits)
+    temporal_raw[TEMPORAL_RAW_COLS] = (temporal_raw[TEMPORAL_RAW_COLS].to_numpy(dtype="float32") - mean) / std
+
+    combined = embeddings_df.merge(temporal_raw, on=INSTANCE_COLS, how="inner")
+    assert len(combined) == len(embeddings_df), "temporal raw features didn't cover every scan in embeddings_df"
+
+    train_df = combined.loc[combined["sequence_name"].isin(splits["train"])]
+    val_df = combined.loc[combined["sequence_name"].isin(splits["val"])]
+    test_df = combined.loc[combined["sequence_name"].isin(splits["test"])]
+
+    train_tracks = build_track_fused_scan_sequences(train_df, point_cols, TEMPORAL_RAW_COLS, classes)
+    val_tracks = build_track_fused_scan_sequences(val_df, point_cols, TEMPORAL_RAW_COLS, classes)
+    test_tracks = build_track_fused_scan_sequences(test_df, point_cols, TEMPORAL_RAW_COLS, classes)
+
+    print(
+        f"single-scan stateful temporal fusion: tracks train={len(train_tracks)} val={len(val_tracks)} "
+        f"test={len(test_tracks)}, point_dim={point_dim}, temporal_dim={len(TEMPORAL_RAW_COLS)}"
+    )
+    return train_tracks, val_tracks, test_tracks, point_dim
+
+
+def _run_fused_single_scan_stateful_epoch(
+    tracks: list[tuple[np.ndarray, np.ndarray]],
+    model: TemporalFusionGRU,
+    n_lanes: int,
+    hidden_size: int,
+    num_layers: int,
+    point_dim: int,
+    optimizer: torch.optim.Optimizer | None = None,
+    criterion: nn.Module | None = None,
+    shuffle: bool = False,
+    trunc_len: int = 1,
+):
+    """Same lane/queue/chunked-TBPTT pattern as deepreflecs_rnn_track_accumulation.
+    _run_single_scan_stateful_epoch, with one difference: model.scan_encoder (trained
+    end-to-end, unlike the frozen point embedding) is applied to each step's raw
+    temporal slice before concatenation and the GRU call, since TemporalFusionGRU's
+    own forward() does that fusion internally but has no h0 argument to carry state
+    through, so this loop reimplements that one step manually."""
+    train = optimizer is not None
+    order = np.random.permutation(len(tracks)) if shuffle else np.arange(len(tracks))
+    queue = iter(order.tolist())
+    lanes: list[dict | None] = [None] * n_lanes
+
+    def refill(lane_i):
+        idx = next(queue, None)
+        if idx is None:
+            lanes[lane_i] = None
+            return
+        seq, labels = tracks[idx]
+        lanes[lane_i] = {"seq": seq, "labels": labels, "pos": 0, "h": None}
+
+    for lane_i in range(n_lanes):
+        refill(lane_i)
+
+    total_loss, total_correct, total_count = 0.0, 0, 0
+    has_loss = criterion is not None
+    y_true_all, y_pred_all = [], []
+    chunk_loss, chunk_steps = None, 0
+
+    while any(lane is not None for lane in lanes):
+        active = [i for i, lane in enumerate(lanes) if lane is not None]
+        batch_x = np.stack([lanes[i]["seq"][lanes[i]["pos"]] for i in active])  # (B, point_dim+temporal_dim)
+        batch_labels = np.array([lanes[i]["labels"][lanes[i]["pos"]] for i in active], dtype="int64")
+        batch_x_t = torch.tensor(batch_x, device=DEVICE)
+        point_part = batch_x_t[:, :point_dim].unsqueeze(1)
+        temporal_part = batch_x_t[:, point_dim:].unsqueeze(1)
+        batch_y_t = torch.tensor(batch_labels, device=DEVICE)
+
+        h0 = torch.cat(
+            [
+                lanes[i]["h"] if lanes[i]["h"] is not None else torch.zeros(num_layers, 1, hidden_size, device=DEVICE)
+                for i in active
+            ],
+            dim=1,
+        )
+
+        if train:
+            scan_emb = model.scan_encoder(temporal_part)
+            fused = torch.cat([point_part, scan_emb], dim=-1)
+            _, h_n = model.gru(fused, h0)
+            logits = model.head(h_n[-1])
+            step_loss = criterion(logits, batch_y_t)
+            chunk_loss = step_loss if chunk_loss is None else chunk_loss + step_loss
+            chunk_steps += 1
+            loss = step_loss
+        else:
+            with torch.no_grad():
+                scan_emb = model.scan_encoder(temporal_part)
+                fused = torch.cat([point_part, scan_emb], dim=-1)
+                _, h_n = model.gru(fused, h0)
+                logits = model.head(h_n[-1])
+                loss = criterion(logits, batch_y_t) if has_loss else None
+
+        preds = logits.argmax(dim=1)
+        if has_loss:
+            total_loss += loss.item() * len(active)
+        total_correct += (preds == batch_y_t).sum().item()
+        total_count += len(active)
+        y_true_all.extend(batch_labels.tolist())
+        y_pred_all.extend(preds.detach().cpu().tolist())
+
+        if train and chunk_steps >= trunc_len:
+            optimizer.zero_grad()
+            (chunk_loss / chunk_steps).backward()
+            optimizer.step()
+            chunk_loss, chunk_steps = None, 0
+            h_n = h_n.detach()
+        elif not train:
+            h_n = h_n.detach()
+
+        for col, i in enumerate(active):
+            lanes[i]["h"] = h_n[:, col : col + 1, :]
+            lanes[i]["pos"] += 1
+            if lanes[i]["pos"] >= len(lanes[i]["labels"]):
+                refill(i)
+
+    if train and chunk_steps > 0:
+        optimizer.zero_grad()
+        (chunk_loss / chunk_steps).backward()
+        optimizer.step()
+
+    avg_loss = total_loss / total_count if has_loss else None
+    acc = total_correct / total_count
+    return avg_loss, acc, np.array(y_true_all), np.array(y_pred_all)
+
+
+def train_fused_single_scan_stateful(
+    train_tracks: list[tuple[np.ndarray, np.ndarray]],
+    val_tracks: list[tuple[np.ndarray, np.ndarray]],
+    point_dim: int,
+    temporal_dim: int,
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+    trunc_len: int = 1,
+):
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    y_train_all = np.concatenate([labels for _, labels in train_tracks])
+    weights_by_class = class_weights(pd.Series([classes[i] for i in y_train_all]))
+    weight_tensor = torch.tensor([weights_by_class[cls] for cls in classes], dtype=torch.float32, device=DEVICE)
+    print(f"class weights: {dict(zip(classes, weight_tensor.tolist()))}")
+
+    model = TemporalFusionGRU(
+        point_dim, temporal_dim, hidden_size=hidden_size, num_layers=num_layers,
+        num_classes=len(classes), mlp_hidden_dim=mlp_hidden_dim,
+    ).to(DEVICE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss(weight=weight_tensor)
+
+    history = []
+    for epoch in range(epochs):
+        model.train()
+        train_loss, train_acc, _, _ = _run_fused_single_scan_stateful_epoch(
+            train_tracks, model, n_lanes, hidden_size, num_layers, point_dim,
+            optimizer=optimizer, criterion=criterion, shuffle=True, trunc_len=trunc_len,
+        )
+        model.eval()
+        _, val_acc, _, _ = _run_fused_single_scan_stateful_epoch(
+            val_tracks, model, n_lanes, hidden_size, num_layers, point_dim,
+            optimizer=None, criterion=None, shuffle=False, trunc_len=trunc_len,
+        )
+        history.append({"epoch": epoch + 1, "train_loss": train_loss, "train_acc": train_acc, "val_acc": val_acc})
+        print(f"epoch {epoch + 1}/{epochs}: train_loss={train_loss:.4f} train_acc={train_acc:.4f} val_acc={val_acc:.4f}")
+
+    return model, history
+
+
+def run_fused_single_scan_stateful_training(
+    df: pd.DataFrame,
+    embeddings_df: pd.DataFrame,
+    classes: list[str] = MLP_CLASSES,
+    epochs: int = EPOCHS,
+    n_lanes: int = BATCH_SIZE,
+    lr: float = LEARNING_RATE,
+    random_state: int = RANDOM_STATE,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    mlp_hidden_dim: int = MLP_HIDDEN_DIM,
+    trunc_len: int = 1,
+    output_dir=None,
+    splits: dict[str, list[str]] | None = None,
+):
+    if output_dir is None:
+        output_dir = RNN_DIR / f"single_scan_stateful_temporal_fusion_h{hidden_size}_trunc{trunc_len}"
+    if splits is None:
+        splits = load_split()
+
+    train_tracks, val_tracks, test_tracks, point_dim = prepare_fused_track_scan_splits(df, embeddings_df, classes, splits)
+    temporal_dim = len(TEMPORAL_RAW_COLS)
+
+    model, history = train_fused_single_scan_stateful(
+        train_tracks, val_tracks, point_dim, temporal_dim, classes, epochs, n_lanes, lr,
+        random_state, hidden_size, num_layers, mlp_hidden_dim, trunc_len,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "model.pt")
+    history_cache = output_dir / "training_history.json"
+    history_cache.write_text(json.dumps({"point_dim": point_dim, "temporal_dim": temporal_dim, "history": history}, indent=2))
+    print(f"Saved {output_dir / 'model.pt'} and {history_cache}")
+    plot_training_curves(history, output_dir=output_dir)
+    return model, history, test_tracks, point_dim
+
+
+def evaluate_fused_single_scan_stateful_test_metrics(
+    model: TemporalFusionGRU,
+    test_tracks: list[tuple[np.ndarray, np.ndarray]],
+    point_dim: int,
+    classes: list[str] = MLP_CLASSES,
+    output_dir=None,
+    hidden_size: int = HIDDEN_SIZE,
+    num_layers: int = GRU_LAYERS,
+    n_lanes: int = 256,
+    trunc_len: int = 1,
+):
+    from deepreflecs_rnn_track_accumulation import _evaluate_gru_stateful_metrics
+
+    if output_dir is None:
+        output_dir = RNN_DIR / f"single_scan_stateful_temporal_fusion_h{hidden_size}_trunc{trunc_len}"
+    model.eval()
+    _, _, y_true, y_pred = _run_fused_single_scan_stateful_epoch(
+        test_tracks, model, n_lanes, hidden_size, num_layers, point_dim,
+        optimizer=None, criterion=None, shuffle=False,
+    )
+    return _evaluate_gru_stateful_metrics(
+        y_true, y_pred, classes,
+        metrics_cache=output_dir / "test_metrics.json",
+        confusion_matrix_path=output_dir / "test_confusion_matrix.png",
+        metrics_bar_path=output_dir / "test_precision_recall_f1.png",
+        split_name=f"test (single-scan stateful temporal fusion, hidden_size={hidden_size}, trunc_len={trunc_len})",
+    )
+
+
 if __name__ == "__main__":
     N = 20
     output_dir = TEMPORAL_FUSION_DIR / f"N{N}_stride1_allsensors"

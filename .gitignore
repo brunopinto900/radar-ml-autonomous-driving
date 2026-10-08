@@ -12,6 +12,7 @@ notebooks/mlp_ablations_lengthy.ipynb
 track_accumulation.md
 notebooks/track_accumulation_n20_allsensors.ipynb
 MLP_MaxAD_Findings.md
+final_report.pdf
 results/*
 !results/mlp/
 results/mlp/*
