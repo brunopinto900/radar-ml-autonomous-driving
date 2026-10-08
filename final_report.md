@@ -1283,6 +1283,36 @@ signatures, a large car and a small truck, or one person and a loose group, rath
 than a fixable model weakness: `car` is the class every `large_vehicle` error falls
 into, and the pedestrian/group confusion is symmetric, not a one-directional bias.
 
+**A caveat on "FIFO buffer": not actually live streaming here.** Every diagram and
+result above talks about a per-track FIFO buffer, but this project never runs a live
+stream, scans arriving one at a time, hidden state updated as they land. What's
+actually computed is an offline reconstruction: each track's full scan history already
+exists in the dataset, and the windowing functions just slice out, after the fact, what
+a buffer *would have held* at each point in time. Same math, same causal guarantee (a
+window never contains a future scan), but no literal buffer object, no live loop.
+
+**Why that distinction matters: the stateless GRU above is O(N) per scan, not O(1).**
+Every window replays its up-to-N scans from a zeroed hidden state, so a track running
+long enough needs a fresh N-step replay every single new scan, not a cheap update, a
+deployed version would redo almost the same computation every step. That cost is what
+motivated testing a single-scan stateful design instead: no window, one new scan fed
+per step, hidden state carried from the previous step rather than reset to zero.
+
+```
+h0=0 --GRU--> h1 --GRU--> h2 --GRU--> h3 --GRU--> h4 --GRU--> h5
+       (e1)         (e2)         (e3)         (e4)         (e5)
+```
+
+One continuous chain, O(1) per scan, no replay. Naive training (gradients detached and
+backpropagated after every single step) regressed hard, 0.8004 macro F1 against the
+stateless baseline's 0.8895. Letting gradients flow across 20 consecutive steps before
+each detach (chunked truncated BPTT, matching this branch's own N=20) recovered nearly
+all of it: 0.8846, within this report's own "under a point is a tie" bar. So O(1)
+streaming is reachable without a real accuracy cost, but only if training lets the
+model's gates see far enough back to learn it, not from the architecture change alone.
+
+**Deployment conclusion: pick O(1) despite the slightly lower score.** Trunc_len=20 closes the gap to within this report's own noise band (0.8846 vs 0.8895), not a meaningful accuracy cost. The stateless design, by contrast, has a real deployment cost that doesn't show up in macro F1 at all: live, every track would need its full N-scan window replayed from a zeroed hidden state at every new scan, on hardware the stateless offline evaluation here never has to pay for. For a deployed system, the O(1) single-scan-stateful GRU is the better choice, a near-tie on accuracy with vastly cheaper per-scan inference, not the stateless baseline that happens to be a hair ahead in this one offline comparison.
+
 ## 6. Ablation studies
 
 Everything below is single-split, not fold-validated: a proper 6-fold sweep at this scale takes roughly a full day of compute per configuration, not run here for every variant in this table.
