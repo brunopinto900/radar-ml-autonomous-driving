@@ -5,6 +5,7 @@
 \usepackage{array}
 \usepackage{amsmath}
 \usepackage{caption}
+\usepackage{subcaption}
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 
@@ -448,13 +449,6 @@ once per scan across the whole dataset, not once per window, so a sliding
 window's scan-to-scan overlap costs nothing extra in encoder compute
 (Fig.~\ref{fig:gru}).
 
-\begin{figure*}[t]
-  \centering
-  \includegraphics[width=0.85\textwidth]{results/final_report/final_report_27_0.png}
-  \caption{GRU: causal recurrence over frozen per-scan DeepReflecs embeddings.}
-  \label{fig:gru}
-\end{figure*}
-
 \textbf{Fusion} concatenates this GRU's final hidden state (order-aware) with
 the pooled, order-blind embedding from Section~IV's baseline, then trains a
 small classifier head on the concatenation, both branches frozen.
@@ -468,9 +462,19 @@ actually missing.
 
 \begin{figure*}[t]
   \centering
-  \includegraphics[width=0.85\textwidth]{results/final_report/final_report_30_0.png}
-  \caption{Fusion: order-blind pooled embedding concatenated with the causal GRU's hidden state, both branches frozen.}
-  \label{fig:fusion}
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{results/final_report/final_report_27_0.png}
+    \caption{GRU: causal recurrence over frozen per-scan DeepReflecs embeddings.}
+    \label{fig:gru}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{results/final_report/final_report_30_0.png}
+    \caption{Fusion: order-blind pooled embedding concatenated with the causal GRU's hidden state, both branches frozen.}
+    \label{fig:fusion}
+  \end{subfigure}
 \end{figure*}
 
 \begin{table*}[t]
@@ -666,37 +670,40 @@ Concrete next steps, in order of expected information gained per hour spent:
 \appendices
 \section{Training Parameters}
 
-Baseline: Fusion, pooled DeepReflecs + GRU $h=64$.
+The fusion model (pooled DeepReflecs + GRU, $h{=}64$) is trained in four
+frozen stages, in order: (1) an $N{=}1$ DeepReflecs encoder, one embedding
+per scan; (2) the $N{=}20$ pooled DeepReflecs encoder of Section~IV,
+independently; (3) a one-layer GRU, $h{=}64$, on the frozen stage-1
+embeddings; (4) a two-hidden-layer MLP fusion head, $h{=}16$, on the
+concatenation of the stage-2 encoder output and the stage-3 GRU's final
+hidden state, with stages 1--3 frozen. Table~\ref{tab:training} gives the
+shared settings.
 
-The fusion model combines two independently trained branches. The first
-branch uses the $N=20$ pooled DeepReflecs encoder from Section~IV. The
-second branch uses a separately trained $N=1$ DeepReflecs encoder, which
-produces one embedding per scan. These embeddings are computed and stored
-before training the GRU, so they are not recomputed for each window. The GRU
-is then trained on the sequence of frozen embeddings.
+\begin{table}[t]
+  \centering
+  \caption{Training Parameters (All Stages, All Results)}
+  \label{tab:training}
+  \begin{tabular}{ll}
+    \toprule
+    Parameter & Value \\
+    \midrule
+    Optimizer & Adam, lr $4\times10^{-5}$ \\
+    Batch size & 128 \\
+    Epochs & 100, final-epoch weights \\
+    & (no early stopping/checkpointing) \\
+    Loss & Class-weighted cross-entropy, \\
+    & $w_i = \max(\text{count})/\text{count}_i$ \\
+    Split & \texttt{StratifiedGroupKFold} by \\
+    & \texttt{sequence\_name}, 70/15/15 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
-The model is trained in four separate stages, with no joint training between
-them. First, the $N=1$ DeepReflecs encoder is trained. The $N=20$ pooled
-encoder is trained separately. A one-layer GRU with a hidden size of 64 is
-then trained using the frozen $N=1$ embeddings. Finally, a small MLP fusion
-head with two hidden layers and a hidden size of 16 is trained using the
-concatenation of the pooled encoder output and the GRU's final hidden state.
-During this final stage, only the fusion head is trained, while both
-encoders and the GRU remain frozen.
-
-All four stages use the same training setup: Adam with a learning rate of
-$4\times10^{-5}$, a batch size of 128, and 100 epochs. The same
-class-weighted cross-entropy loss is used, with class weights defined as
-$\max(\text{count})/\text{count}_i$. No early stopping or checkpoint
-restoration is used, so the weights from the final epoch are used.
-
-The train/val/test split is fixed and done by \texttt{sequence\_name}, not by
-scan; splitting by scan would leak information across splits. It uses
-\texttt{StratifiedGroupKFold} with a 70/15/15 ratio, test carved out first,
-then val from the remainder, and this same split is used for every result in
-this report. Earlier, smaller-scale results in the project were instead
-validated across 6 different sequence-grouped folds, to measure a
-fold-to-fold noise band before trusting a gain as real.
+Splitting by \texttt{sequence\_name} rather than by scan avoids leaking a
+track across splits; test is carved out first, then val from the remainder,
+and this same split is used for every result in this report. Earlier,
+smaller-scale results were cross-validated across 6 sequence-grouped folds to
+measure a fold-to-fold noise band before trusting a gain as real.
 
 \begin{thebibliography}{4}
 
