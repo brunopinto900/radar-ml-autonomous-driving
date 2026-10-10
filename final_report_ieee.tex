@@ -29,13 +29,14 @@ scans instead of classifying each scan in isolation. A naive pooled baseline
 (DeepReflecs, $N=20$ scans, all sensors, no notion of scan order) already
 reaches 0.8613 macro F1 purely from extra points. The best result (0.8897
 macro F1) comes from a causal GRU that consumes the sequence of per-scan
-embeddings directly (order-aware, one hidden state per track), fused with the
-order-blind pooled embedding through a small trained classifier head. The
-fusion model's confusion matrix shows two dominant error axes: 15\% of
-\emph{large\_vehicle} tracks are misclassified as \emph{car} (the reverse
-barely happens, 3.8\%), and \emph{pedestrian}/\emph{pedestrian\_group} confuse
-each other in both directions (6.6\% and 8.6\%), consistent with those being
-genuinely ambiguous radar signatures rather than a model-specific weakness.
+embeddings directly (order-aware, one hidden state per track); fusing it with
+the order-blind pooled embedding through a small trained classifier head adds
+only $+0.0002$, within this project's own single-split noise band, not a
+reliable additional gain. The fusion model's confusion matrix shows two
+dominant error axes: 15\% of \emph{large\_vehicle} tracks are misclassified
+as \emph{car} (the reverse barely happens, 3.8\%), and
+\emph{pedestrian}/\emph{pedestrian\_group} confuse each other in both
+directions (6.6\% and 8.6\%).
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -265,8 +266,8 @@ for correct \emph{two\_wheeler}, confused is still the quietest group
 scan-to-scan, not just at a single instant. RCS temporal variation is 94.7
 for confused, close to true pedestrian's 88.6 and well below correct
 \emph{two\_wheeler}'s 117.6. The floor holds on both axes once measured
-correctly: a genuinely stationary bike/rider (stopped, feet down) rather than
-just slow motion.\footnote{An earlier pass at this computed ``dynamics'' as a
+correctly: this reads as a stationary or near-stationary
+bike/rider, not just a snapshot that happens to look slow.\footnote{An earlier pass at this computed ``dynamics'' as a
 point-to-point diff across the raw pooled point array, which mixes
 within-scan spatial variation with across-scan temporal change and is
 confounded by point count. The velocity conclusion above happens to survive
@@ -304,7 +305,7 @@ car's (diagonal 3.3 vs.\ car's 4.3, vs.\ 13.7 for a correctly classified
 34.8~m car). At longer range, fewer of a long vehicle's physically separated
 reflectors resolve into distinct detections, collapsing it toward a compact,
 car-sized point cloud regardless of its real length -- the same
-range/resolution effect, not a labeling issue.
+range/resolution effect.
 
 Scan-to-scan dynamics, computed correctly, do not tell a clean ``converges
 toward car'' story the way extent and point count do. $vr$ temporal variation
@@ -351,9 +352,10 @@ feature, it takes a max-pool over a learned per-point transform, so even a
 genuinely separable signal in the mean or lower tail could be invisible to
 whatever extreme value max-pooling happens to grab. Both cues are far weaker
 than the median comparison suggested, and overlap too heavily with car's own
-distribution to count as a reliable, usable signal. The actual driver is
-extent, point count, and velocity dynamics converging toward car-like values,
-not a cue the model failed to use.
+distribution to count as a reliable, usable signal. RCS was never as
+separable here as the summary statistic made it look; extent and point count
+(Table~\ref{tab:lv-car}) remain the only cues shown above to separate the
+groups cleanly.
 
 \subsection{Tracker-Feature Check}
 
@@ -413,8 +415,29 @@ Taken together with the RCS mean/Doppler spread check, none of these cues
 clear the bar of a clean, usable signal on their own. This is the main
 evidence against a temporal encoder branch for these two confusions
 specifically: curvature is the one feature that shows a real, if moderate,
-effect, everything else looks like noise or a floor-vs-reference artifact
-rather than exploitable structure.
+effect. Everything else looks like noise, or an AUC that's only non-trivial
+because the comparison group itself happens to be a weak reference, not a
+usable separating signal. This also undercuts Section~III's original
+motivation for a sequence model (micro-Doppler and RCS dynamics evolving scan
+to scan): that motivation still justifies a sequence model in principle, but
+for these two specific confusions the scan-to-scan dynamics checked here
+carry little to no signal, whatever the GRU/fusion gain over pooling is
+coming from, it is not these engineered dynamics features.
+
+\textbf{Checking whether the features work together, not just alone.} Each
+feature above was tested in isolation; a classifier combining several weak
+cues nonlinearly can still separate classes that no single cue separates
+alone. A shallow gradient-boosted-tree classifier over all 8 features
+together, 5-fold cross-validated, same two confusions, found real joint
+separability the univariate check missed: AUC 0.78--0.92 depending on the
+confusion, above the $\sim$0.78 ceiling any single feature reached alone.
+Feature importance was concentrated, not spread evenly: velocity variance,
+velocity oscillation, curvature, and RCS variance carried nearly all of it;
+the drift features carried essentially none, consistent with their
+0.50--0.54 AUC in Table~\ref{tab:tracker}. So the univariate check's ``no
+usable temporal cue left'' conclusion holds feature by feature, but not for
+the features combined, which motivated a learned architecture over the raw
+tracker signal (Section~VII).
 
 \section{Sequence Model: GRU, and Fusion with the Pooled View}
 
@@ -439,7 +462,10 @@ small classifier head on the concatenation, both branches frozen.
 Structurally analogous to a U-Net skip connection \cite{ronneberger2015unet}:
 splice in a view the deeper path's own bottleneck might otherwise discard,
 instead of forcing one representation to carry everything
-(Fig.~\ref{fig:fusion}).
+(Fig.~\ref{fig:fusion}). In practice this does not pay off here: the result
+below shows fusion adding $+0.0002$ over the GRU alone, within noise, so the
+pooled branch is not contributing information the GRU's own hidden state was
+actually missing.
 
 \begin{figure*}[t]
   \centering
@@ -471,15 +497,13 @@ instead of forcing one representation to carry everything
 
 \textbf{GRU alone: macro F1 = 0.8895} (+0.0260 over the pooling baseline).
 \textbf{Fusion: macro F1 = 0.8897} (+0.0002 over GRU alone, within this
-branch's own noise band for a single split, not a real additional gain). The
-best overall result either way (Table~\ref{tab:gru-fusion}).
+branch's own noise band for a single split, not a real additional gain)
+(Table~\ref{tab:gru-fusion}).
 
 \textbf{Confusion matrix, fusion model.} Two dominant error axes:
 \emph{large\_vehicle} $\to$ \emph{car} at 15\% (the reverse direction is only
 3.8\%), and \emph{pedestrian} $\leftrightarrow$ \emph{pedestrian\_group}
-confuse each other both ways (6.6\% and 8.6\%). Both read as genuinely
-ambiguous radar signatures, a large car and a small truck, or one person and
-a loose group, rather than a fixable model weakness: \emph{car} is the class
+confuse each other both ways (6.6\% and 8.6\%). \emph{car} is the class
 every \emph{large\_vehicle} error falls into, and the pedestrian/group
 confusion is symmetric, not a one-directional bias (Fig.~\ref{fig:cm-fusion}).
 
@@ -553,8 +577,6 @@ here for every variant in Table~\ref{tab:ablation}.
     \midrule
     More GRU capacity ($h=128$) & Worse or flat vs.\ $h=64$ at every $N$/sensor scale tested & Not capacity-starved; more parameters overfit rather than help \\
     \addlinespace
-    Temporal-variation scalar (scan-to-scan RCS/Doppler diff) added to the pooled or GRU representation & Small, inconsistent gains (+0.001 to +0.013 depending on $N$/sensor), never large & Genuine but marginal signal, sensitive to how it's normalized across cross-sensor time gaps \\
-    \addlinespace
     End-to-end fine-tuning (warmstart) of either the pooled encoder or the GRU's own per-scan encoder, at $N=20$ all-sensor & Both land \emph{below} their frozen baselines ($-0.0029$, $-0.0017$) & An already-good frozen encoder already sits near this task's ceiling; the one $N=10$ sensor2-only warmstart win does not generalize to this scale \\
     \addlinespace
     Post-hoc probability smoothing (causal, along a track) on the fusion model's output & Small positive: +0.0013 (moving average, $K=5$) to +0.0031 (IIR low-pass, same span) & Free accuracy at inference time, not a training-time fix \\
@@ -606,6 +628,18 @@ Concrete next steps, in order of expected information gained per hour spent:
   use the same frozen DeepReflecs encoder for each scan. If this encoder is
   the main bottleneck, improving the sequence model is unlikely to lead to
   large gains.
+\item \textbf{Fairly re-test the learned tracker-feature encoder.} A
+  gradient-boosted-tree check (Section~IV-D) found real joint separability
+  across the 8 patent-inspired features (AUC 0.78--0.92) that no single
+  feature showed alone, motivating a temporal-fusion GRU built on that
+  basis: a small trainable encoder over the raw per-scan tracker signal,
+  fused with the frozen point embedding and trained end-to-end. It reached
+  0.8938 macro F1, ahead of fusion's 0.8897, but using best-val-accuracy
+  checkpoint restoration, a different training convention from every other
+  result in this report (Appendix), so the comparison is not
+  apples-to-apples as it stands. Fold-validating both under matching
+  conventions, before treating this as a real gain, is the direct next
+  step.
 \end{enumerate}
 
 \appendix

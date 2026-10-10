@@ -12,16 +12,15 @@ N radar scans instead of classifying each scan in isolation.
 A naive pooled baseline (DeepReflecs, N=20 scans, all sensors, no notion of scan
 order at all) already reaches 0.8613 macro F1 purely from extra points.
 The best result (0.8897 macro F1) comes from a causal GRU that consumes the sequence of
-per-scan embeddings directly (order-aware, one hidden state per track), fused with
-the order-blind pooled embedding through a small trained classifier head. The full
-pipeline is shown in Figure 1.
+per-scan embeddings directly (order-aware, one hidden state per track); fusing it with
+the order-blind pooled embedding through a small trained classifier head adds only
++0.0002, within this project's own single-split noise band, not a reliable additional
+gain. The full pipeline is shown in Figure 1.
 
 The fusion model's confusion matrix shows two dominant error axes: 15% of
 `large_vehicle` tracks get misclassified as `car` (the reverse barely happens, 3.8%),
 and `pedestrian`/`pedestrian_group` confuse each other in both directions (6.6% and
-8.6%), consistent with those being genuinely ambiguous radar signatures (a large car
-vs. a small truck; one individual person vs. a group) rather than a model-specific
-weakness.
+8.6%).
 
 ![Multi-scan pipeline: FIFO buffer, DeepReflecs encoder, GRU](pipeline_overview.png)
 
@@ -475,7 +474,7 @@ summary
 
 **Why the remaining 3% (Figure 6).** The 345 confused windows are two_wheeler's sparse, slow tail: half the points of a correctly classified two_wheeler window, a spatial extent shrunk toward pedestrian's, and a velocity of -0.14 m/s median (a correctly classified two_wheeler moves at +2.09 m/s) indistinguishable from a walking pedestrian's +0.41 m/s.
 
-Scan-to-scan dynamics (median per scan, diffed consecutively, normalized by real elapsed time, the project's own established `build_windowed_temporal_features`) confirm this isn't just a snapshot effect: vr temporal variation is 3.64 for confused windows vs. 4.51 for true pedestrian and 6.30 for correct two_wheeler, confused is still the quietest group scan-to-scan, not just at a single instant. RCS temporal variation is 94.7 for confused, close to true pedestrian's 88.6 and well below correct two_wheeler's 117.6. So the floor here holds on both axes once measured correctly: a genuinely stationary bike/rider (stopped, feet down) rather than just slow motion, consistent with the large_vehicle/car and pedestrian/pedestrian_group confusions discussed next for the fusion model (Figure 9).
+Scan-to-scan dynamics (median per scan, diffed consecutively, normalized by real elapsed time, the project's own established `build_windowed_temporal_features`) confirm this isn't just a snapshot effect: vr temporal variation is 3.64 for confused windows vs. 4.51 for true pedestrian and 6.30 for correct two_wheeler, confused is still the quietest group scan-to-scan, not just at a single instant. RCS temporal variation is 94.7 for confused, close to true pedestrian's 88.6 and well below correct two_wheeler's 117.6. So the floor here holds on both axes once measured correctly: this reads as a stationary or near-stationary bike/rider, not just a snapshot that happens to look slow, consistent with the large_vehicle/car and pedestrian/pedestrian_group confusions discussed next for the fusion model (Figure 9).
 
 *(An earlier pass at this computed "dynamics" as a point-to-point diff across the raw pooled point array, which mixes within-scan spatial variation with across-scan temporal change and is confounded by point count. The velocity conclusion above happens to survive that error; the large_vehicle/car case below does not, see its note.)*
 
@@ -601,7 +600,7 @@ summary_lv
 
 
 
-**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect, not a labeling issue.
+**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect.
 
 Scan-to-scan dynamics, computed correctly (median per scan, diffed consecutively, normalized by real elapsed time), do not tell a clean "converges toward car" story the way extent and point count do. vr temporal variation for confused windows (1.85) sits between correct large_vehicle's low 1.03 and true car's much higher 4.08, closer to large_vehicle's own quiet end than to car's. RCS temporal variation for confused windows (172.1) is actually the *highest* of the three groups, above both correct large_vehicle (128.5) and true car (145.9). This is unresolved, no explanation found: confused windows keep large_vehicle-like low velocity dynamics while showing unusually elevated RCS variation, neither converging toward car nor staying flat like large_vehicle.
 
@@ -664,7 +663,7 @@ plt.show()
 
 **Checking whether RCS was actually usable, not just different at the median.** A median gap can look clean while the underlying distributions still overlap heavily. There is also a separate architecture question: DeepReflecs never computes "mean RCS of the window" as a feature, it takes a max-pool over a learned per-point transform, so even a genuinely separable RCS signal in the mean or lower tail could be invisible to whatever extreme value max-pooling happens to grab. A capacity/data issue compounds this further: this sparse (38-point), range-degraded large_vehicle regime is a small minority of large_vehicle's training examples (median window is 164 points), so the model may never have seen enough "sparse large_vehicle, still high RCS" examples to learn to lean on it even if the rule would work.
 
-Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. RCS was never as separable here as the summary statistic made it look. The actual driver is extent, point count, and velocity dynamics converging toward car-like values, not a cue the model failed to use.
+Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. RCS was never as separable here as the summary statistic made it look; extent and point count (Figure 6) remain the only cues shown above to separate the groups cleanly.
 
 
 ```python
@@ -1040,8 +1039,11 @@ clears ~0.78; curvature vs. correct large_vehicle is the strongest result in the
 Taken together with the RCS mean / Doppler spread check earlier, none of these cues clear
 the bar of a clean, usable signal on their own. This is the main evidence against a temporal
 encoder branch for these two confusions specifically: curvature is the one feature that shows
-a real, if moderate, effect, everything else here looks like noise or a floor-vs-reference
-artifact rather than exploitable structure.
+a real, if moderate, effect. Everything else here looks like noise, or an AUC that's only
+non-trivial because the comparison group itself happens to be a weak reference, not a usable
+separating signal. This also undercuts Section 3's original motivation for a sequence model (micro-Doppler and RCS dynamics evolving scan to scan): that motivation still justifies a sequence model in principle, but for these two specific confusions the scan-to-scan dynamics checked here carry little to no signal, whatever the GRU/fusion gain over pooling is coming from, it is not these engineered dynamics features.
+
+**Checking whether the features work together, not just alone.** Each feature above was tested in isolation; a classifier combining several weak cues nonlinearly can still separate classes that no single cue separates alone. A shallow gradient-boosted-tree classifier over all 8 features together, 5-fold cross-validated, same two confusions, found real joint separability the univariate check missed: AUC 0.78-0.92 depending on the confusion, above the ~0.78 ceiling any single feature reached alone. Feature importance was concentrated, not spread evenly: velocity variance, velocity oscillation, curvature, and RCS variance carried nearly all of it; the drift features carried essentially none, consistent with their 0.50-0.54 AUC in the table above. So the univariate check's "no usable temporal cue left" conclusion holds feature by feature, but not for the features combined, which motivated a learned architecture over the raw tracker signal (Section 7).
 
 ## 5. Sequence model: GRU, and fusion with the pooled view
 
@@ -1131,7 +1133,9 @@ order-blind embedding from Section 4's baseline, then trains a small classifier 
 on the concatenation, both branches frozen. Structurally analogous to a U-Net skip
 connection (Ronneberger, Fischer & Brox, MICCAI 2015): splice in a view the deeper
 path's own bottleneck might otherwise discard, instead of forcing one representation
-to carry everything (Figure 8).
+to carry everything (Figure 8). In practice this doesn't pay off here: the result below
+shows fusion adding +0.0002 over the GRU alone, within noise, so the pooled branch isn't
+contributing information the GRU's own hidden state was actually missing.
 
 
 ```python
@@ -1274,14 +1278,13 @@ display(Image(filename=str(RESULTS / "track_accumulation_rnn/N20_stride1_fusion_
 
 **GRU alone: macro F1 = 0.8895** (+0.0260 over the pooling baseline). **Fusion:
 macro F1 = 0.8897** (+0.0002 over GRU alone, within this branch's own noise band for
-a single split, not a real additional gain). The best overall result either way.
+a single split, not a real additional gain).
 
 **Confusion matrix, fusion model (Figure 9).** Two dominant error axes: `large_vehicle` -> `car`
 at 15% (the reverse direction is only 3.8%), and `pedestrian` <-> `pedestrian_group`
-confuse each other both ways (6.6% and 8.6%). Both read as genuinely ambiguous radar
-signatures, a large car and a small truck, or one person and a loose group, rather
-than a fixable model weakness: `car` is the class every `large_vehicle` error falls
-into, and the pedestrian/group confusion is symmetric, not a one-directional bias.
+confuse each other both ways (6.6% and 8.6%). `car` is the class every `large_vehicle`
+error falls into, and the pedestrian/group confusion is symmetric, not a one-directional
+bias.
 
 **A caveat on "FIFO buffer": not actually live streaming here.** Every diagram and
 result above talks about a per-track FIFO buffer, but this project never runs a live
@@ -1324,7 +1327,6 @@ Everything below is single-split, not fold-validated: a proper 6-fold sweep at t
 | what was tried | result vs. its own reference | reads as |
 |---|---|---|
 | More GRU capacity (h=128) | Worse or flat vs. h=64 at every N/sensor scale tested | Not capacity-starved; more parameters overfit rather than help |
-| Temporal-variation scalar (scan-to-scan RCS/Doppler diff) added to the pooled or GRU representation | Small, inconsistent gains (+0.001 to +0.013 depending on N/sensor), never large | Genuine but marginal signal, sensitive to how it's normalized across cross-sensor time gaps |
 | End-to-end fine-tuning (warmstart) of either the pooled encoder or the GRU's own per-scan encoder, at N=20 all-sensor | Both land *below* their frozen baselines (-0.0029, -0.0017) | An already-good frozen encoder already sits near this task's ceiling; the one N=10 sensor2-only warmstart win doesn't generalize to this scale |
 | Post-hoc probability smoothing (causal, along a track) on the fusion model's output | Small positive: +0.0013 (moving average, K=5) to +0.0031 (IIR low-pass, same span) | Free accuracy at inference time, not a training-time fix |
 | Other sequence-mixing architectures (Transformer, a selective state-space model, point-level self-attention), same frozen per-scan embeddings | All land inside the same ~0.86 to 0.89 macro F1 band as GRU/fusion | The bottleneck is upstream of which sequence-mixing mechanism is used, not solved by trying a different one |
@@ -1348,6 +1350,8 @@ a further, smaller amount (-> 0.8897). Trying different designs for the sequence
 3. **Inspect the confusion matrix manually.** Focus on cases such as `large_vehicle` predicted as `car` and `pedestrian` vs. `pedestrian_group`. Compare these cases with the raw point clouds and RadarScenes ground truth, as these classes can be difficult to distinguish even for a human.
 
 4. **Question the frozen per-scan embedding.** All sequence models use the same frozen DeepReflecs encoder for each scan. If this encoder is the main bottleneck, improving the sequence model is unlikely to lead to large gains.
+
+5. **Fairly re-test the learned tracker-feature encoder.** A gradient-boosted-tree check (Section 4) found real joint separability across the 8 patent-inspired features (AUC 0.78-0.92) that no single feature showed alone, motivating a temporal-fusion GRU built on that basis: a small trainable encoder over the raw per-scan tracker signal, fused with the frozen point embedding and trained end-to-end. It reached 0.8938 macro F1, ahead of fusion's 0.8897, but using best-val-accuracy checkpoint restoration, a different training convention from every other result in this report (Appendix), so the comparison is not apples-to-apples as it stands. Fold-validating both under matching conventions, before treating this as a real gain, is the direct next step.
 
 
 ## Appendix: training parameters (baseline: Fusion, pooled DeepReflecs + GRU h=64)
