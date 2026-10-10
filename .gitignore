@@ -13,6 +13,10 @@ track_accumulation.md
 notebooks/track_accumulation_n20_allsensors.ipynb
 MLP_MaxAD_Findings.md
 final_report.pdf
+final_report_ieee.pdf
+final_report_ieee.aux
+final_report_ieee.log
+final_report_ieee.out
 results/*
 !results/mlp/
 results/mlp/*
