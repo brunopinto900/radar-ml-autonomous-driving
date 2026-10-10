@@ -219,7 +219,7 @@ which scatterers cross the CFAR threshold is dominated by speckle (coherent
 fading), not just the object's geometry, so consecutive scans give largely
 independent noisy draws of the same object rather than redundant copies.
 Pooling $N$ of them is variance reduction on the detection process (more
-points per class-defining statistic), plus some genuine aspect-angle
+points per class-defining statistic), plus some aspect-angle
 diversity from ego/relative motion; this report cannot cleanly separate how
 much each contributes.
 
@@ -424,8 +424,7 @@ for these two specific confusions the scan-to-scan dynamics checked here
 carry little to no signal, whatever the GRU/fusion gain over pooling is
 coming from, it is not these engineered dynamics features.
 
-\textbf{Checking whether the features work together, not just alone.} Each
-feature above was tested in isolation; a classifier combining several weak
+Each feature above was tested in isolation; a classifier combining several weak
 cues nonlinearly can still separate classes that no single cue separates
 alone. A shallow gradient-boosted-tree classifier over all 8 features
 together, 5-fold cross-validated, same two confusions, found real joint
@@ -443,7 +442,7 @@ tracker signal (Section~VII).
 
 A frozen, already-trained DeepReflecs encoder reduces each scan to one
 embedding vector; a GRU then consumes the sequence of a track's embeddings
-causally (a verdict at scan $t$ only depends on scans up to and including
+causally (a prediction at scan $t$ only depends on scans up to and including
 $t$, so it stays usable in real-time streaming inference). The encoder runs
 once per scan across the whole dataset, not once per window, so a sliding
 window's scan-to-scan overlap costs nothing extra in encoder compute
@@ -500,7 +499,7 @@ actually missing.
 branch's own noise band for a single split, not a real additional gain)
 (Table~\ref{tab:gru-fusion}).
 
-\textbf{Confusion matrix, fusion model.} Two dominant error axes:
+The fusion model's confusion matrix shows two dominant error axes:
 \emph{large\_vehicle} $\to$ \emph{car} at 15\% (the reverse direction is only
 3.8\%), and \emph{pedestrian} $\leftrightarrow$ \emph{pedestrian\_group}
 confuse each other both ways (6.6\% and 8.6\%). \emph{car} is the class
@@ -516,16 +515,16 @@ confusion is symmetric, not a one-directional bias (Fig.~\ref{fig:cm-fusion}).
 
 \subsection{Streaming Cost: O(N) vs.\ O(1)}
 
-A caveat on ``FIFO buffer'': not actually live streaming here. Every diagram
-and result above talks about a per-track FIFO buffer, but this project never
-runs a live stream, scans arriving one at a time, hidden state updated as
-they land. What is actually computed is an offline reconstruction: each
-track's full scan history already exists in the dataset, and the windowing
-functions just slice out, after the fact, what a buffer \emph{would have
-held} at each point in time. Same math, same causal guarantee (a window never
-contains a future scan), but no literal buffer object, no live loop.
+Every diagram and result above talks about a per-track FIFO buffer, but this
+project never runs a live stream, scans arriving one at a time, hidden state
+updated as they land. What is actually computed is an offline
+reconstruction: each track's full scan history already exists in the
+dataset, and the windowing functions just slice out, after the fact, what a
+buffer \emph{would have held} at each point in time. The causal guarantee
+still holds (a window never contains a future scan); it is just computed in
+one pass over stored data rather than maintained incrementally.
 
-Why that distinction matters: the stateless GRU above is $O(N)$ per scan, not
+This matters because the stateless GRU above is $O(N)$ per scan, not
 $O(1)$. Every window replays its up-to-$N$ scans from a zeroed hidden state,
 so a track running long enough needs a fresh $N$-step replay every single new
 scan, not a cheap update -- a deployed version would redo almost the same
@@ -549,16 +548,38 @@ reachable without a real accuracy cost, but only if training lets the
 model's gates see far enough back to learn it, not from the architecture
 change alone.
 
-\textbf{Deployment conclusion: pick $O(1)$ despite the slightly lower score.}
-trunc\_len=20 closes the gap to within this report's own noise band (0.8846
-vs.\ 0.8895), not a meaningful accuracy cost. The stateless design, by
-contrast, has a real deployment cost that does not show up in macro F1 at
+For deployment, $O(1)$ is the better choice despite the slightly lower
+score. trunc\_len=20 closes the gap to within this report's own noise band
+(0.8846 vs.\ 0.8895), not a meaningful accuracy cost. The stateless design,
+by contrast, has a real deployment cost that does not show up in macro F1 at
 all: live, every track would need its full $N$-scan window replayed from a
 zeroed hidden state at every new scan, on hardware the stateless offline
-evaluation here never has to pay for. For a deployed system, the $O(1)$
-single-scan-stateful GRU is the better choice, a near-tie on accuracy with
-vastly cheaper per-scan inference, not the stateless baseline that happens to
-be a hair ahead in this one offline comparison.
+evaluation here never has to pay for. The $O(1)$ single-scan-stateful GRU is
+a near-tie on accuracy with vastly cheaper per-scan inference, not the
+stateless baseline that happens to be a hair ahead in this one offline
+comparison.
+
+$O(1)$ also changes the \emph{pedestrian}/\emph{pedestrian\_group} split,
+which is mostly an instantaneous point-density judgment: one person's
+cluster of points versus several overlapping ones. The stateless baseline
+re-makes that judgment from $h_0{=}0$ every window; the $O(1)$ design
+instead carries a hidden state across a track's full history, so once it
+settles on ``this reads as one person'' early in a track, a later ambiguous
+scan gets pulled toward that committed state instead of being judged fresh.
+That explains pedestrian recall rising to 0.961 and pedestrian\_group recall
+falling to 0.826 as the same mechanism from two sides.
+
+This is not an unqualified improvement. A class judgment made early in a
+track now propagates to every later scan instead of being re-evaluated each
+window. Here the propagated judgment happened to be correct more often than
+not, but the same mechanism would propagate an early misclassification just
+as readily, nothing in the design distinguishes a correct lock-in from an
+incorrect one. That is the practical argument for not carrying hidden state
+unconditionally for a track's entire lifetime, and instead resetting it to
+zero after a gap of no detections longer than some threshold
+(gap\_threshold), the same mechanism discussed for track ID reuse. A reset
+bounds how long a wrong early commitment can keep contaminating later
+decisions, at the cost of losing carried state across real tracking gaps.
 
 \section{Ablation Studies}
 
@@ -642,7 +663,7 @@ Concrete next steps, in order of expected information gained per hour spent:
   step.
 \end{enumerate}
 
-\appendix
+\appendices
 \section{Training Parameters}
 
 Baseline: Fusion, pooled DeepReflecs + GRU $h=64$.

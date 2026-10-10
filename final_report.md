@@ -301,7 +301,7 @@ display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/
 alone, no new architecture. Weakest class is still `two_wheeler` (F1 0.813), but
 every class improved substantially over Section 2's single-scan numbers (Figure 6).
 
-Why pooling helps even on a near-static track: at ~2.9 points per scan, which scatterers cross the CFAR threshold is dominated by speckle (coherent fading), not just the object's geometry, so consecutive scans give largely independent noisy draws of the same object rather than redundant copies. Pooling N of them is variance reduction on the detection process (more points per class-defining statistic), plus some genuine aspect-angle diversity from ego/relative motion; this report can't cleanly separate how much each contributes.
+Why pooling helps even on a near-static track: at ~2.9 points per scan, which scatterers cross the CFAR threshold is dominated by speckle (coherent fading), not just the object's geometry, so consecutive scans give largely independent noisy draws of the same object rather than redundant copies. Pooling N of them is variance reduction on the detection process (more points per class-defining statistic), plus some aspect-angle diversity from ego/relative motion; this report can't cleanly separate how much each contributes.
 
 One specific confusion drops a lot: two_wheeler misclassified as pedestrian falls from 8% (single scan) to 3% (pooled N=20), consistent with pooling resolving the two classes' overlapping point-count/RCS regime rather than just raising two_wheeler's overall recall uniformly.
 
@@ -661,7 +661,7 @@ plt.show()
     
 
 
-**Checking whether RCS was actually usable, not just different at the median.** A median gap can look clean while the underlying distributions still overlap heavily. There is also a separate architecture question: DeepReflecs never computes "mean RCS of the window" as a feature, it takes a max-pool over a learned per-point transform, so even a genuinely separable RCS signal in the mean or lower tail could be invisible to whatever extreme value max-pooling happens to grab. A capacity/data issue compounds this further: this sparse (38-point), range-degraded large_vehicle regime is a small minority of large_vehicle's training examples (median window is 164 points), so the model may never have seen enough "sparse large_vehicle, still high RCS" examples to learn to lean on it even if the rule would work.
+RCS mean needs checking against the actual distributions, not just the median: a median gap can look clean while the underlying distributions still overlap heavily. There is also a separate architecture question: DeepReflecs never computes "mean RCS of the window" as a feature, it takes a max-pool over a learned per-point transform, so even a genuinely separable RCS signal in the mean or lower tail could be invisible to whatever extreme value max-pooling happens to grab. A capacity/data issue compounds this further: this sparse (38-point), range-degraded large_vehicle regime is a small minority of large_vehicle's training examples (median window is 164 points), so the model may never have seen enough "sparse large_vehicle, still high RCS" examples to learn to lean on it even if the rule would work.
 
 Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. RCS was never as separable here as the summary statistic made it look; extent and point count (Figure 6) remain the only cues shown above to separate the groups cleanly.
 
@@ -1043,12 +1043,12 @@ a real, if moderate, effect. Everything else here looks like noise, or an AUC th
 non-trivial because the comparison group itself happens to be a weak reference, not a usable
 separating signal. This also undercuts Section 3's original motivation for a sequence model (micro-Doppler and RCS dynamics evolving scan to scan): that motivation still justifies a sequence model in principle, but for these two specific confusions the scan-to-scan dynamics checked here carry little to no signal, whatever the GRU/fusion gain over pooling is coming from, it is not these engineered dynamics features.
 
-**Checking whether the features work together, not just alone.** Each feature above was tested in isolation; a classifier combining several weak cues nonlinearly can still separate classes that no single cue separates alone. A shallow gradient-boosted-tree classifier over all 8 features together, 5-fold cross-validated, same two confusions, found real joint separability the univariate check missed: AUC 0.78-0.92 depending on the confusion, above the ~0.78 ceiling any single feature reached alone. Feature importance was concentrated, not spread evenly: velocity variance, velocity oscillation, curvature, and RCS variance carried nearly all of it; the drift features carried essentially none, consistent with their 0.50-0.54 AUC in the table above. So the univariate check's "no usable temporal cue left" conclusion holds feature by feature, but not for the features combined, which motivated a learned architecture over the raw tracker signal (Section 7).
+Each feature above was tested in isolation; a classifier combining several weak cues nonlinearly can still separate classes that no single cue separates alone. A shallow gradient-boosted-tree classifier over all 8 features together, 5-fold cross-validated, same two confusions, found real joint separability the univariate check missed: AUC 0.78-0.92 depending on the confusion, above the ~0.78 ceiling any single feature reached alone. Feature importance was concentrated, not spread evenly: velocity variance, velocity oscillation, curvature, and RCS variance carried nearly all of it; the drift features carried essentially none, consistent with their 0.50-0.54 AUC in the table above. So the univariate check's "no usable temporal cue left" conclusion holds feature by feature, but not for the features combined, which motivated a learned architecture over the raw tracker signal (Section 7).
 
 ## 5. Sequence model: GRU, and fusion with the pooled view
 
 A frozen, already-trained DeepReflecs encoder reduces each scan to one embedding
-vector; a GRU then consumes the sequence of a track's embeddings causally (a verdict at scan t only depends on scans up to and
+vector; a GRU then consumes the sequence of a track's embeddings causally (a prediction at scan t only depends on scans up to and
 including t, so it stays usable in real-time streaming inference). The encoder runs
 once per scan across the whole dataset, not once per window, so a sliding window's
 scan-to-scan overlap costs nothing extra in encoder compute (Figure 7).
@@ -1280,26 +1280,24 @@ display(Image(filename=str(RESULTS / "track_accumulation_rnn/N20_stride1_fusion_
 macro F1 = 0.8897** (+0.0002 over GRU alone, within this branch's own noise band for
 a single split, not a real additional gain).
 
-**Confusion matrix, fusion model (Figure 9).** Two dominant error axes: `large_vehicle` -> `car`
+The fusion model's confusion matrix (Figure 9) shows two dominant error axes: `large_vehicle` -> `car`
 at 15% (the reverse direction is only 3.8%), and `pedestrian` <-> `pedestrian_group`
 confuse each other both ways (6.6% and 8.6%). `car` is the class every `large_vehicle`
 error falls into, and the pedestrian/group confusion is symmetric, not a one-directional
 bias.
 
-**A caveat on "FIFO buffer": not actually live streaming here.** Every diagram and
-result above talks about a per-track FIFO buffer, but this project never runs a live
-stream, scans arriving one at a time, hidden state updated as they land. What's
-actually computed is an offline reconstruction: each track's full scan history already
-exists in the dataset, and the windowing functions just slice out, after the fact, what
-a buffer *would have held* at each point in time. Same math, same causal guarantee (a
-window never contains a future scan), but no literal buffer object, no live loop.
+Every diagram and result above talks about a per-track FIFO buffer, but this project
+never runs a live stream, scans arriving one at a time, hidden state updated as they
+land. What's actually computed is an offline reconstruction: each track's full scan
+history already exists in the dataset, and the windowing functions just slice out,
+after the fact, what a buffer *would have held* at each point in time. The causal guarantee still holds (a window never contains a future scan); it is just computed in one pass over stored data rather than maintained incrementally.
 
-**Why that distinction matters: the stateless GRU above is O(N) per scan, not O(1).**
-Every window replays its up-to-N scans from a zeroed hidden state, so a track running
-long enough needs a fresh N-step replay every single new scan, not a cheap update, a
-deployed version would redo almost the same computation every step. That cost is what
-motivated testing a single-scan stateful design instead: no window, one new scan fed
-per step, hidden state carried from the previous step rather than reset to zero.
+This matters because the stateless GRU above is O(N) per scan, not O(1). Every window
+replays its up-to-N scans from a zeroed hidden state, so a track running long enough
+needs a fresh N-step replay every single new scan, not a cheap update; a deployed
+version would redo almost the same computation every step. That cost motivated testing
+a single-scan stateful design instead: no window, one new scan fed per step, hidden
+state carried from the previous step rather than reset to zero.
 
 ```
 h0=0 --GRU--> h1 --GRU--> h2 --GRU--> h3 --GRU--> h4 --GRU--> h5
@@ -1314,11 +1312,11 @@ all of it: 0.8846, within this report's own "under a point is a tie" bar. So O(1
 streaming is reachable without a real accuracy cost, but only if training lets the
 model's gates see far enough back to learn it, not from the architecture change alone.
 
-**Deployment conclusion: pick O(1) despite the slightly lower score.** Trunc_len=20 closes the gap to within this report's own noise band (0.8846 vs 0.8895), not a meaningful accuracy cost. The stateless design, by contrast, has a real deployment cost that doesn't show up in macro F1 at all: live, every track would need its full N-scan window replayed from a zeroed hidden state at every new scan, on hardware the stateless offline evaluation here never has to pay for. For a deployed system, the O(1) single-scan-stateful GRU is the better choice, a near-tie on accuracy with vastly cheaper per-scan inference, not the stateless baseline that happens to be a hair ahead in this one offline comparison.
+For deployment, O(1) is the better choice despite the slightly lower score. Trunc_len=20 closes the gap to within this report's own noise band (0.8846 vs 0.8895), not a meaningful accuracy cost. The stateless design, by contrast, has a real deployment cost that doesn't show up in macro F1 at all: live, every track would need its full N-scan window replayed from a zeroed hidden state at every new scan, on hardware the stateless offline evaluation here never has to pay for. The O(1) single-scan-stateful GRU is a near-tie on accuracy with vastly cheaper per-scan inference, not the stateless baseline that happens to be a hair ahead in this one offline comparison.
 
-**Why pedestrian recall jumps under O(1), and the risk that comes with it.** The pedestrian/pedestrian_group split is mostly an instantaneous point-density judgment: one person's cluster of points versus several overlapping ones. The stateless baseline re-makes that judgment from h0=0 every window. The O(1) design instead carries a hidden state across a track's full history, so once it settles on "this reads as one person" early in a track, a later ambiguous scan gets pulled toward that committed state instead of being judged fresh. That explains pedestrian recall rising to 0.961 and pedestrian_group recall falling to 0.826 as the same mechanism from two sides.
+O(1) also changes the pedestrian/pedestrian_group split, which is mostly an instantaneous point-density judgment: one person's cluster of points versus several overlapping ones. The stateless baseline re-makes that judgment from h0=0 every window; the O(1) design instead carries a hidden state across a track's full history, so once it settles on "this reads as one person" early in a track, a later ambiguous scan gets pulled toward that committed state instead of being judged fresh. That explains pedestrian recall rising to 0.961 and pedestrian_group recall falling to 0.826 as the same mechanism from two sides.
 
-This is not an unqualified improvement. A class judgment made early in a track now propagates to every later scan instead of being re-evaluated each window. Here the propagated judgment happened to be correct more often than not, but the same mechanism would propagate an early misclassification just as readily, there is nothing in the design that distinguishes a correct lock-in from an incorrect one. This is the practical argument for not carrying hidden state unconditionally for a track's entire lifetime, and instead resetting it to zero after a gap of no detections longer than some threshold (gap_threshold), the same mechanism discussed for track ID reuse. A reset bounds how long a wrong early commitment can keep contaminating later decisions, at the cost of losing carried state across real tracking gaps.
+This is not an unqualified improvement. A class judgment made early in a track now propagates to every later scan instead of being re-evaluated each window. Here the propagated judgment happened to be correct more often than not, but the same mechanism would propagate an early misclassification just as readily, nothing in the design distinguishes a correct lock-in from an incorrect one. That is the practical argument for not carrying hidden state unconditionally for a track's entire lifetime, and instead resetting it to zero after a gap of no detections longer than some threshold (gap_threshold), the same mechanism discussed for track ID reuse. A reset bounds how long a wrong early commitment can keep contaminating later decisions, at the cost of losing carried state across real tracking gaps.
 
 ## 6. Ablation studies
 
