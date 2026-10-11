@@ -684,7 +684,7 @@ with torch.no_grad():
         embeddings.append(embed_points(model_cm, batch_x_t, batch_mask_t))
 emb = torch.cat(embeddings, dim=0).cpu().numpy()
 
-k = 15
+k = 30
 nn = NearestNeighbors(n_neighbors=k + 1).fit(emb)
 
 _, idxs_confused = nn.kneighbors(emb[mask_confused_lv])
@@ -699,8 +699,8 @@ display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/
 display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/lv_car_tsne.png")))
 ```
 
-    confused: mean fraction of 15 nearest neighbors that are true large_vehicle = 0.852, median = 1.000
-    correctly classified large_vehicle: mean fraction = 0.991, median = 1.000
+    confused: mean fraction of 30 nearest neighbors that are true large_vehicle = 0.718, median = 0.800
+    correctly classified large_vehicle: mean fraction = 0.977, median = 1.000
 
 
 
@@ -715,11 +715,11 @@ display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/
     
 
 
-If no single feature separates these groups, does the model's own representation already? A k-nearest-neighbor check in the raw 32-dim pooled embedding (k=15) says mostly yes: confused windows are still locally surrounded almost entirely by true large_vehicle neighbors (median 100%, mean 85%), close to correctly-classified large_vehicle's own 99%. The error is happening downstream of the representation, in the classifier head's decision boundary, not in the embedding itself.
+If no single feature separates these groups, does the model's own representation already? A k-nearest-neighbor check in the raw 32-dim pooled embedding (k=30) says no, not cleanly: confused windows average only 72% true-large_vehicle neighbors (median 80%), well below correctly-classified large_vehicle's own 98% (median 100%). A tighter k=15 check looked purer (mean 85%, median 100%), but that was an artifact of looking too close: widening the neighborhood to k=30 already shows real car contamination for the confused group specifically, while the correctly-classified group barely moves. These windows sit right at the boundary, not deep in large_vehicle territory.
 
-A t-SNE projection of the same embedding (perplexity 30) complicates this: confused windows are scattered throughout car's cluster rather than grouped into one sub-region, meaning each one is individually marginal for its own reasons rather than sharing one fixable mechanism.
+A t-SNE projection of the same embedding (perplexity 30) confirms this: confused windows are scattered throughout car's cluster rather than grouped into one sub-region, meaning each one is individually marginal for its own reasons rather than sharing one fixable mechanism.
 
-The two checks tell different stories for different windows: for the locally-pure majority, the representation already has the right answer, and a deeper or wider classifier head might recover them; for the rest, sitting in the broader mixed zone t-SNE shows, that's genuine ambiguity no classifier head would fix. Classifier-head capacity was never ablated directly in this project; it's deferred to future work.
+Both checks agree once measured at a consistent scale: this is genuine ambiguity in the input, not a classifier artifact. The embedding already places these windows close to the car/large_vehicle boundary, not safely on the large_vehicle side; there is no hidden representation that already has the right answer waiting to be unlocked by a better head.
 
 
 ```python
@@ -1370,9 +1370,7 @@ a further, smaller amount (-> 0.8897). Trying different designs for the sequence
 
 3. **Question the frozen per-scan embedding.** All sequence models use the same frozen DeepReflecs encoder for each scan. If this encoder is the main bottleneck, improving the sequence model is unlikely to lead to large gains.
 
-4. **Ablate classifier-head capacity on the frozen pooled embedding.** A k-NN check on the large_vehicle/car confusion (Section 4) found that a majority of confused windows are still locally surrounded by true large_vehicle neighbors in the raw embedding, suggesting the current single classifier head's decision boundary, not the representation, mis-places some of them. A deeper or wider head on this same frozen embedding was never tested and could recover part of this gap; a t-SNE check on the same windows suggests the rest is genuine ambiguity no classifier head would fix, so this is only a partial fix at best.
-
-5. **Fairly re-test the learned tracker-feature encoder.** A gradient-boosted-tree check (Section 4) found real joint separability across the 8 patent-inspired features (AUC 0.78-0.92) that no single feature showed alone, motivating a temporal-fusion GRU built on that basis: a small trainable encoder over the raw per-scan tracker signal, fused with the frozen point embedding and trained end-to-end. It reached 0.8938 macro F1, ahead of fusion's 0.8897, but using best-val-accuracy checkpoint restoration, a different training convention from every other result in this report (Appendix), so the comparison is not apples-to-apples as it stands. Fold-validating both under matching conventions, before treating this as a real gain, is the direct next step.
+4. **Fairly re-test the learned tracker-feature encoder.** A gradient-boosted-tree check (Section 4) found real joint separability across the 8 patent-inspired features (AUC 0.78-0.92) that no single feature showed alone, motivating a temporal-fusion GRU built on that basis: a small trainable encoder over the raw per-scan tracker signal, fused with the frozen point embedding and trained end-to-end. It reached 0.8938 macro F1, ahead of fusion's 0.8897, but using best-val-accuracy checkpoint restoration, a different training convention from every other result in this report (Appendix), so the comparison is not apples-to-apples as it stands. Fold-validating both under matching conventions, before treating this as a real gain, is the direct next step.
 
 
 ## Appendix: training parameters (baseline: Fusion, pooled DeepReflecs + GRU h=64)

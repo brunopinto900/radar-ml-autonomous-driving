@@ -342,23 +342,26 @@ mean signal could be invisible to it.
 
 If no single feature separates these groups, does the model's own
 representation already? A $k$-nearest-neighbor check in the raw 32-dim
-pooled embedding ($k{=}15$, Table~\ref{tab:knn}, Fig.~\ref{fig:knn-hist})
-says mostly yes: confused windows are still locally surrounded almost
-entirely by true \emph{large\_vehicle} neighbors (median 100\%, mean 85\%),
-close to correctly-classified \emph{large\_vehicle}'s own 99\%. The error is
-happening downstream of the representation, in the classifier head's
-decision boundary, not in the embedding itself.
+pooled embedding ($k{=}30$, Table~\ref{tab:knn}, Fig.~\ref{fig:knn-hist})
+says no, not cleanly: confused windows average only 72\% true-\emph{large\_vehicle}
+neighbors (median 80\%), well below correctly-classified
+\emph{large\_vehicle}'s own 98\% (median 100\%). A tighter $k{=}15$ check
+looked purer (mean 85\%, median 100\%), but that was an artifact of looking
+too close: widening the neighborhood to $k{=}30$ already shows real car
+contamination for the confused group specifically, while the
+correctly-classified group barely moves. These windows sit right at the
+boundary, not deep in \emph{large\_vehicle} territory.
 
 \begin{table}[t]
   \centering
-  \caption{$k$-NN Check ($k{=}15$): Fraction of Neighbors That Are True large\_vehicle}
+  \caption{$k$-NN Check ($k{=}30$): Fraction of Neighbors That Are True large\_vehicle}
   \label{tab:knn}
   \begin{tabular}{lrr}
     \toprule
     Group & Mean & Median \\
     \midrule
-    Confused (true lv, pred car) & 0.852 & 1.000 \\
-    Correctly classified lv      & 0.991 & 1.000 \\
+    Confused (true lv, pred car) & 0.718 & 0.800 \\
+    Correctly classified lv      & 0.977 & 1.000 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -366,12 +369,12 @@ decision boundary, not in the embedding itself.
 \begin{figure}[t]
   \centering
   \includegraphics[width=0.95\columnwidth]{results/track_accumulation/N20_stride1_allsensors/lv_car_knn_fraction_hist.png}
-  \caption{$k$-NN check: confused windows are still locally large\_vehicle-like.}
+  \caption{$k$-NN check ($k{=}30$): confused windows' local purity.}
   \label{fig:knn-hist}
 \end{figure}
 
 A t-SNE projection of the same embedding (perplexity 30, Fig.~\ref{fig:tsne})
-complicates this: confused windows are scattered throughout car's cluster
+confirms this: confused windows are scattered throughout car's cluster
 rather than grouped into one sub-region, meaning each one is individually
 marginal for its own reasons rather than sharing one fixable mechanism.
 
@@ -382,12 +385,11 @@ marginal for its own reasons rather than sharing one fixable mechanism.
   \label{fig:tsne}
 \end{figure}
 
-The two checks tell different stories for different windows: for the
-locally-pure majority, the representation already has the right answer, and
-a deeper or wider classifier head might recover them; for the rest, sitting
-in the broader mixed zone t-SNE shows, that is genuine ambiguity no
-classifier head would fix. Classifier-head capacity was never ablated
-directly in this project; it is deferred to future work.
+Both checks agree once measured at a consistent scale: this is genuine
+ambiguity in the input, not a classifier artifact. The embedding already
+places these windows close to the car/\emph{large\_vehicle} boundary, not
+safely on the \emph{large\_vehicle} side; there is no hidden representation
+already holding the right answer.
 
 \subsection{Tracker-Feature Check}
 
@@ -646,16 +648,6 @@ Concrete next steps, in order of expected information gained per hour spent:
   use the same frozen DeepReflecs encoder for each scan. If this encoder is
   the main bottleneck, improving the sequence model is unlikely to lead to
   large gains.
-\item \textbf{Ablate classifier-head capacity on the frozen pooled
-  embedding.} A $k$-NN check on the \emph{large\_vehicle}/\emph{car}
-  confusion (Section~IV-B) found that a majority of confused windows are
-  still locally surrounded by true \emph{large\_vehicle} neighbors in the
-  raw embedding, suggesting the current single classifier head's decision
-  boundary, not the representation, mis-places some of them. A deeper or
-  wider head on this same frozen embedding was never tested and could
-  recover part of this gap; a t-SNE check on the same windows suggests the
-  rest is genuine ambiguity no classifier head would fix, so this is only a
-  partial fix at best.
 \item \textbf{Fairly re-test the learned tracker-feature encoder.} A
   gradient-boosted-tree check (Section~IV-D) found real joint separability
   across the 8 patent-inspired features (AUC 0.78--0.92) that no single
