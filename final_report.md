@@ -600,13 +600,7 @@ summary_lv
 
 
 
-**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect.
-
-Scan-to-scan dynamics, computed correctly (median per scan, diffed consecutively, normalized by real elapsed time), do not tell a clean "converges toward car" story the way extent and point count do. vr temporal variation for confused windows (1.85) sits between correct large_vehicle's low 1.03 and true car's much higher 4.08, closer to large_vehicle's own quiet end than to car's. RCS temporal variation for confused windows (172.1) is actually the *highest* of the three groups, above both correct large_vehicle (128.5) and true car (145.9). This is unresolved, no explanation found: confused windows keep large_vehicle-like low velocity dynamics while showing unusually elevated RCS variation, neither converging toward car nor staying flat like large_vehicle.
-
-*(This specific stat went through three computation methods before landing here, a raw per-window sum confounded by point count, then a point-to-point diff mixing within-scan and across-scan variation, both of which showed confused windows as uniformly "quieter than car." Neither survived the correct scan-median, elapsed-time-normalized computation above, which is the project's own established `build_windowed_temporal_features` method. Worth remembering as a caution about how fragile this kind of post-hoc point-cloud statistic is to exactly how it's aggregated.)*
-
-RCS mean (the level, not the scan-to-scan variation above) looked like a surviving cue at the median (2.33 confused vs. 2.50 correct large_vehicle vs. -0.55 car), but a median gap can look clean while the underlying distributions still overlap heavily, and that turns out to be exactly what happens here (next cell).
+**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect. Scan-to-scan dynamics (RCS/velocity, computed correctly) were also checked and add no clean story on top of this: velocity stays large_vehicle-like but RCS variation is unexpectedly elevated, an unresolved detail that doesn't change the conclusion below.
 
 
 ```python
@@ -617,6 +611,10 @@ rcs_confused = np.array([test_sets[i][:, 2].mean() for i in np.where(mask_confus
 rcs_car = np.array([test_sets[i][:, 2].mean() for i in np.where(mask_car_true)[0]])
 dop_confused = np.array([test_sets[i][:, 3].std() for i in np.where(mask_confused_lv)[0]])
 dop_car = np.array([test_sets[i][:, 3].std() for i in np.where(mask_car_true)[0]])
+n_confused = np.array([test_sets[i].shape[0] for i in np.where(mask_confused_lv)[0]])
+n_car = np.array([test_sets[i].shape[0] for i in np.where(mask_car_true)[0]])
+diag_confused = np.array([np.sqrt(np.ptp(test_sets[i][:, 0]) ** 2 + np.ptp(test_sets[i][:, 1]) ** 2) for i in np.where(mask_confused_lv)[0]])
+diag_car = np.array([np.sqrt(np.ptp(test_sets[i][:, 0]) ** 2 + np.ptp(test_sets[i][:, 1]) ** 2) for i in np.where(mask_car_true)[0]])
 
 
 def auc_and_overlap(a, b):
@@ -631,6 +629,10 @@ def auc_and_overlap(a, b):
 
 rcs_auc, rcs_overlap = auc_and_overlap(rcs_confused, rcs_car)
 dop_auc, dop_overlap = auc_and_overlap(dop_confused, dop_car)
+n_auc, n_overlap = auc_and_overlap(n_confused, n_car)
+diag_auc, diag_overlap = auc_and_overlap(diag_confused, diag_car)
+print(f"Points/window: single-feature AUC={n_auc:.3f}, {n_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
+print(f"Diagonal length: single-feature AUC={diag_auc:.3f}, {diag_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
 print(f"RCS mean: single-feature AUC={rcs_auc:.3f}, {rcs_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
 print(f"Doppler spread: single-feature AUC={dop_auc:.3f}, {dop_overlap:.0%} of confused windows fall inside true car's own 10-90pct range")
 
@@ -651,6 +653,8 @@ fig.tight_layout()
 plt.show()
 ```
 
+    Points/window: single-feature AUC=0.584, 85% of confused windows fall inside true car's own 10-90pct range
+    Diagonal length: single-feature AUC=0.609, 83% of confused windows fall inside true car's own 10-90pct range
     RCS mean: single-feature AUC=0.624, 88% of confused windows fall inside true car's own 10-90pct range
     Doppler spread: single-feature AUC=0.651, 87% of confused windows fall inside true car's own 10-90pct range
 
@@ -661,9 +665,61 @@ plt.show()
     
 
 
-RCS mean needs checking against the actual distributions, not just the median: a median gap can look clean while the underlying distributions still overlap heavily. There is also a separate architecture question: DeepReflecs never computes "mean RCS of the window" as a feature, it takes a max-pool over a learned per-point transform, so even a genuinely separable RCS signal in the mean or lower tail could be invisible to whatever extreme value max-pooling happens to grab. A capacity/data issue compounds this further: this sparse (38-point), range-degraded large_vehicle regime is a small minority of large_vehicle's training examples (median window is 164 points), so the model may never have seen enough "sparse large_vehicle, still high RCS" examples to learn to lean on it even if the rule would work.
+RCS mean looked like a surviving cue at the median (2.33 confused vs. 2.50 correct large_vehicle vs. -0.55 car), but a median gap can look clean while distributions overlap heavily. None of the four candidate features, points/window, diagonal length, RCS mean, Doppler spread, clears a usable separability bar alone: AUC 0.58-0.65 across the board, with 83-88% of confused windows falling inside true car's own 10th-90th percentile range on every one of them. A large median gap does not imply a large single-feature AUC once distributions overlap this much. There's also an architecture reason RCS specifically is moot regardless: DeepReflecs never computes "mean RCS of the window" as a feature, it max-pools a learned per-point transform, so even a separable mean signal could be invisible to it.
 
-Pulling the actual distributions settles it: RCS mean separates confused large_vehicle from true car with AUC 0.624, and Doppler spread with AUC 0.651 (0.5 is chance, 1.0 is perfect), with 88% and 87% of confused windows respectively falling inside true car's own 10th-90th percentile range. Both cues are far weaker than the median comparison suggested, and overlap too heavily with car's own distribution to count as a reliable, usable signal. RCS was never as separable here as the summary statistic made it look; extent and point count (Figure 6) remain the only cues shown above to separate the groups cleanly.
+
+```python
+from sklearn.neighbors import NearestNeighbors
+from sklearn.manifold import TSNE
+
+batch_size = 1024
+embeddings = []
+with torch.no_grad():
+    for start in range(0, len(test_std), batch_size):
+        batch_sets = test_std[start : start + batch_size]
+        batch_m_max = max(p.shape[0] for p in batch_sets)
+        batch_x, batch_mask = pad_to_fixed(batch_sets, batch_m_max)
+        batch_x_t = torch.tensor(batch_x, device=DEVICE)
+        batch_mask_t = torch.tensor(batch_mask, device=DEVICE)
+        embeddings.append(embed_points(model_cm, batch_x_t, batch_mask_t))
+emb = torch.cat(embeddings, dim=0).cpu().numpy()
+
+k = 15
+nn = NearestNeighbors(n_neighbors=k + 1).fit(emb)
+
+_, idxs_confused = nn.kneighbors(emb[mask_confused_lv])
+frac_lv_confused = (y_test[idxs_confused[:, 1:]] == idx_lv).mean(axis=1)
+_, idxs_correct = nn.kneighbors(emb[mask_lv_correct])
+frac_lv_correct = (y_test[idxs_correct[:, 1:]] == idx_lv).mean(axis=1)
+
+print(f"confused: mean fraction of {k} nearest neighbors that are true large_vehicle = {frac_lv_confused.mean():.3f}, median = {np.median(frac_lv_confused):.3f}")
+print(f"correctly classified large_vehicle: mean fraction = {frac_lv_correct.mean():.3f}, median = {np.median(frac_lv_correct):.3f}")
+
+display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/lv_car_knn_fraction_hist.png")))
+display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/lv_car_tsne.png")))
+```
+
+    confused: mean fraction of 15 nearest neighbors that are true large_vehicle = 0.852, median = 1.000
+    correctly classified large_vehicle: mean fraction = 0.991, median = 1.000
+
+
+
+    
+![png](results/final_report/final_report_24_1.png)
+    
+
+
+
+    
+![png](results/final_report/final_report_24_2.png)
+    
+
+
+If no single feature separates these groups, does the model's own representation already? A k-nearest-neighbor check in the raw 32-dim pooled embedding (k=15) says mostly yes: confused windows are still locally surrounded almost entirely by true large_vehicle neighbors (median 100%, mean 85%), close to correctly-classified large_vehicle's own 99%. The error is happening downstream of the representation, in the classifier head's decision boundary, not in the embedding itself.
+
+A t-SNE projection of the same embedding (perplexity 30) complicates this: confused windows are scattered throughout car's cluster rather than grouped into one sub-region, meaning each one is individually marginal for its own reasons rather than sharing one fixable mechanism.
+
+The two checks tell different stories for different windows: for the locally-pure majority, the representation already has the right answer, and a deeper or wider classifier head might recover them; for the rest, sitting in the broader mixed zone t-SNE shows, that's genuine ambiguity no classifier head would fix. Classifier-head capacity was never ablated directly in this project; it's deferred to future work.
 
 
 ```python
@@ -993,29 +1049,9 @@ display(temporal_study_lv)
 </div>
 
 
-**Patent-inspired tracker features: does either confusion have a usable temporal cue left?**
+**Tracker-Feature Check**
 
-Checked 8 scan-to-scan dynamics features against both confusions, inspired by Aptiv's
-US 12,013,919 B2 ("Method for Classifying a Tracked Object"), which fuses a point-set
-branch with a separate tracker-feature branch (variance of velocity, variance of heading
-direction, absolute curvature, among others) before a GRU. Same AUC/overlap diagnostic as
-the RCS mean / Doppler spread check above, applied per-feature, per-confusion, before
-building anything:
-
-- **heading variance**: `1 - R` where `R = sqrt(mean(cos(heading))^2 + mean(sin(heading))^2)`
-  over the window's per-scan centroid headings (circular variance, handles wraparound).
-- **curvature**: mean of `|Δheading| / step_distance` between consecutive scans.
-- **RCS / velocity variance**: variance of each scan's own median RCS / vr_compensated
-  across the window (spread of the raw level, not a diff).
-- **RCS / velocity signed-diff variance ("oscillation")**: variance of the *signed*
-  scan-to-scan diffs of those same per-scan medians, high if the value swings up and down
-  even when the net change is zero.
-- **RCS / velocity signed-diff mean ("drift")**: mean of the same signed diffs, the net
-  directional trend over the window.
-
-Heading/curvature use each scan's centroid position (mean x_cc, y_cc); there's no real
-Kalman tracker state in this pipeline to pull a smoothed heading from, so this is a cheap
-proxy, not the patent's actual tracker-filtered feature.
+Checked 8 scan-to-scan dynamics features (heading variance, curvature, RCS and velocity variance/oscillation/drift) against both confusions, inspired by Aptiv's US 12,013,919 B2 ("Method for Classifying a Tracked Object"), which fuses a point-set branch with a tracker-feature branch before a GRU. Heading and curvature use each scan's centroid position as a cheap proxy; there's no real Kalman tracker state in this pipeline.
 
 | feature | tw->ped confused | true pedestrian | AUC vs ped | correct two_wheeler | AUC vs tw | lv->car confused | true car | AUC vs car | correct large_vehicle | AUC vs lv |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -1028,22 +1064,9 @@ proxy, not the patent's actual tracker-filtered feature.
 | RCS diff mean (drift) | 0.027 | -0.000 | 0.530 | -0.008 | 0.533 | 0.011 | -0.023 | 0.517 | -0.010 | 0.515 |
 | velocity diff mean (drift) | -0.004 | 0.003 | 0.537 | -0.001 | 0.507 | 0.002 | 0.004 | 0.532 | 0.002 | 0.505 |
 
-Drift carries no signal anywhere, every AUC is 0.50-0.54, noise floor. Every feature that
-separates at all separates the confused group from its *own* correct class better than from
-the class it gets mistaken for (curvature 0.782 vs. correct large_vehicle but only 0.628 vs.
-true car; heading variance 0.696 vs. correct two_wheeler but only 0.584 vs. true pedestrian),
-the same asymmetry the RCS-mean check found: these confused windows read as atypical for
-their own true class, not as typical examples of the predicted class. No single feature
-clears ~0.78; curvature vs. correct large_vehicle is the strongest result in the table.
+Drift carries no signal anywhere (AUC 0.50-0.54, noise floor). Every feature that separates at all separates the confused group from its *own* correct class better than from the class it gets mistaken for (e.g. curvature 0.782 vs. correct large_vehicle but only 0.628 vs. true car), the same asymmetry the RCS-mean check found: these confused windows read as atypical for their own true class, not as typical examples of the predicted class. No single feature clears ~0.78 against the predicted class, this is the main evidence against a temporal encoder branch for these two confusions specifically, and it undercuts Section 3's original sequence-model motivation for these two cases, though that motivation still holds in principle elsewhere.
 
-Taken together with the RCS mean / Doppler spread check earlier, none of these cues clear
-the bar of a clean, usable signal on their own. This is the main evidence against a temporal
-encoder branch for these two confusions specifically: curvature is the one feature that shows
-a real, if moderate, effect. Everything else here looks like noise, or an AUC that's only
-non-trivial because the comparison group itself happens to be a weak reference, not a usable
-separating signal. This also undercuts Section 3's original motivation for a sequence model (micro-Doppler and RCS dynamics evolving scan to scan): that motivation still justifies a sequence model in principle, but for these two specific confusions the scan-to-scan dynamics checked here carry little to no signal, whatever the GRU/fusion gain over pooling is coming from, it is not these engineered dynamics features.
-
-Each feature above was tested in isolation; a classifier combining several weak cues nonlinearly can still separate classes that no single cue separates alone. A shallow gradient-boosted-tree classifier over all 8 features together, 5-fold cross-validated, same two confusions, found real joint separability the univariate check missed: AUC 0.78-0.92 depending on the confusion, above the ~0.78 ceiling any single feature reached alone. Feature importance was concentrated, not spread evenly: velocity variance, velocity oscillation, curvature, and RCS variance carried nearly all of it; the drift features carried essentially none, consistent with their 0.50-0.54 AUC in the table above. So the univariate check's "no usable temporal cue left" conclusion holds feature by feature, but not for the features combined, which motivated a learned architecture over the raw tracker signal (Section 7).
+A gradient-boosted-tree classifier over all 8 features jointly, 5-fold cross-validated, found real separability the univariate check missed: AUC 0.78-0.92, above the ~0.78 ceiling any single feature reached alone, with importance concentrated in velocity variance, velocity oscillation, curvature, and RCS variance (drift again carries essentially none). So the univariate "no usable cue" conclusion holds feature by feature but not combined, which motivated the learned temporal-fusion architecture tested in Section 7.
 
 ## 5. Sequence model: GRU, and fusion with the pooled view
 
@@ -1122,7 +1145,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_27_0.png)
+![png](results/final_report/final_report_29_0.png)
     
 
 
@@ -1224,7 +1247,7 @@ plt.show()
 
 
     
-![png](results/final_report/final_report_30_0.png)
+![png](results/final_report/final_report_32_0.png)
     
 
 
@@ -1270,7 +1293,7 @@ display(Image(filename=str(RESULTS / "track_accumulation_rnn/N20_stride1_fusion_
 
 
     
-![png](results/final_report/final_report_32_1.png)
+![png](results/final_report/final_report_34_1.png)
     
 
 
@@ -1308,15 +1331,15 @@ One continuous chain, O(1) per scan, no replay. Naive training (gradients detach
 backpropagated after every single step) regressed hard, 0.8004 macro F1 against the
 stateless baseline's 0.8895. Letting gradients flow across 20 consecutive steps before
 each detach (chunked truncated BPTT, matching this branch's own N=20) recovered nearly
-all of it: 0.8846, within this report's own "under a point is a tie" bar. So O(1)
+all of it: 0.8846, within this report's own noise band ("under a point is a tie"), so O(1)
 streaming is reachable without a real accuracy cost, but only if training lets the
 model's gates see far enough back to learn it, not from the architecture change alone.
 
-For deployment, O(1) is the better choice despite the slightly lower score. Trunc_len=20 closes the gap to within this report's own noise band (0.8846 vs 0.8895), not a meaningful accuracy cost. The stateless design, by contrast, has a real deployment cost that doesn't show up in macro F1 at all: live, every track would need its full N-scan window replayed from a zeroed hidden state at every new scan, on hardware the stateless offline evaluation here never has to pay for. The O(1) single-scan-stateful GRU is a near-tie on accuracy with vastly cheaper per-scan inference, not the stateless baseline that happens to be a hair ahead in this one offline comparison.
+For deployment, O(1) is the better choice despite the slightly lower score. The stateless design has a real cost that doesn't show up in macro F1 at all: live, every track would need its full N-scan window replayed from a zeroed hidden state at every new scan, on hardware the stateless offline evaluation here never has to pay for. O(1) gets vastly cheaper per-scan inference for a difference that is noise, not a real accuracy trade.
 
 O(1) also changes the pedestrian/pedestrian_group split, which is mostly an instantaneous point-density judgment: one person's cluster of points versus several overlapping ones. The stateless baseline re-makes that judgment from h0=0 every window; the O(1) design instead carries a hidden state across a track's full history, so once it settles on "this reads as one person" early in a track, a later ambiguous scan gets pulled toward that committed state instead of being judged fresh. That explains pedestrian recall rising to 0.961 and pedestrian_group recall falling to 0.826 as the same mechanism from two sides.
 
-This is not an unqualified improvement. A class judgment made early in a track now propagates to every later scan instead of being re-evaluated each window. Here the propagated judgment happened to be correct more often than not, but the same mechanism would propagate an early misclassification just as readily, nothing in the design distinguishes a correct lock-in from an incorrect one. That is the practical argument for not carrying hidden state unconditionally for a track's entire lifetime, and instead resetting it to zero after a gap of no detections longer than some threshold (gap_threshold), the same mechanism discussed for track ID reuse. A reset bounds how long a wrong early commitment can keep contaminating later decisions, at the cost of losing carried state across real tracking gaps.
+A class judgment made early in a track now propagates to every later scan instead of being re-evaluated each window. The propagated judgment happened to be correct more often than not here, but the same mechanism would propagate an early misclassification just as readily; nothing in the design distinguishes a correct lock-in from an incorrect one. That is the practical argument for not carrying hidden state unconditionally for a track's entire lifetime, and instead resetting it to zero after a gap of no detections longer than some threshold (gap_threshold), the same mechanism discussed for track ID reuse. A reset bounds how long a wrong early commitment can keep contaminating later decisions, at the cost of losing carried state across real tracking gaps.
 
 ## 6. Ablation studies
 
@@ -1345,9 +1368,9 @@ a further, smaller amount (-> 0.8897). Trying different designs for the sequence
 
 2. **Compare errors across models.** Check which tracks are misclassified by the fusion model, GRU, and the other architectures. If the same tracks are consistently misclassified, the main limitation may come from the data or labels rather than the model.
 
-3. **Inspect the confusion matrix manually.** Focus on cases such as `large_vehicle` predicted as `car` and `pedestrian` vs. `pedestrian_group`. Compare these cases with the raw point clouds and RadarScenes ground truth, as these classes can be difficult to distinguish even for a human.
+3. **Question the frozen per-scan embedding.** All sequence models use the same frozen DeepReflecs encoder for each scan. If this encoder is the main bottleneck, improving the sequence model is unlikely to lead to large gains.
 
-4. **Question the frozen per-scan embedding.** All sequence models use the same frozen DeepReflecs encoder for each scan. If this encoder is the main bottleneck, improving the sequence model is unlikely to lead to large gains.
+4. **Ablate classifier-head capacity on the frozen pooled embedding.** A k-NN check on the large_vehicle/car confusion (Section 4) found that a majority of confused windows are still locally surrounded by true large_vehicle neighbors in the raw embedding, suggesting the current single classifier head's decision boundary, not the representation, mis-places some of them. A deeper or wider head on this same frozen embedding was never tested and could recover part of this gap; a t-SNE check on the same windows suggests the rest is genuine ambiguity no classifier head would fix, so this is only a partial fix at best.
 
 5. **Fairly re-test the learned tracker-feature encoder.** A gradient-boosted-tree check (Section 4) found real joint separability across the 8 patent-inspired features (AUC 0.78-0.92) that no single feature showed alone, motivating a temporal-fusion GRU built on that basis: a small trainable encoder over the raw per-scan tracker signal, fused with the frozen point embedding and trained end-to-end. It reached 0.8938 macro F1, ahead of fusion's 0.8897, but using best-val-accuracy checkpoint restoration, a different training convention from every other result in this report (Appendix), so the comparison is not apples-to-apples as it stands. Fold-validating both under matching conventions, before treating this as a real gain, is the direct next step.
 
