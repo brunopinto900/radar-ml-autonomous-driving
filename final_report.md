@@ -14,8 +14,7 @@ order at all) already reaches 0.8613 macro F1 purely from extra points.
 The best result (0.8897 macro F1) comes from a causal GRU that consumes the sequence of
 per-scan embeddings directly (order-aware, one hidden state per track); fusing it with
 the order-blind pooled embedding through a small trained classifier head adds only
-+0.0002, within this project's own single-split noise band, not a reliable additional
-gain. The full pipeline is shown in Figure 1.
++0.0002, within this project's own single-split noise band. The full pipeline is shown in Figure 1.
 
 The fusion model's confusion matrix shows two dominant error axes: 15% of
 `large_vehicle` tracks get misclassified as `car` (the reverse barely happens, 3.8%),
@@ -54,15 +53,9 @@ Classification with Radar Reflections*, IEEE RadarConf 2021,
 network (PointNet-style): the same small MLP processes every point independently, so
 the model is order-invariant and works on a variable number of points by
 construction. This project adapts its input features to what RadarScenes provides (`x_rel`, `y_rel`,
-`rcs`, `vr_compensated`, `range_sc`), not a literal reproduction of the paper's own
-feature set.
+`rcs`, `vr_compensated`, `range_sc`).
 
-What sets it apart from a plain PointNet baseline: the **global context layer** sits
-*between* the two per-point stages, not only at the very end, so the second per-point
-layer already has access to a permutation-invariant summary (mean/max) of the whole
-point set before producing its own output. A **masked global max-pool** then reduces
-the (variable-length) point set to one fixed embedding, invariant to how many padding points get added,
-picking out the most salient reading per channel regardless of point count (Figure 3).
+Unlike PointNet, which applies global pooling exclusively at the final stage, the proposed architecture integrates a global context layer between the two per-point processing stages. This design enables the second per-point layer to incorporate a permutation-invariant summary (mean or max) of the entire point set prior to generating its output. Furthermore, a masked global max-pool is employed to reduce the variable-length point set into a fixed-size embedding that is invariant to padding, thereby extracting the most salient features per channel regardless of total point count (Figure 3).
 
 
 ```python
@@ -147,7 +140,7 @@ display(Image(filename=str(RESULTS / "track_accumulation/N1_stride1_allsensors/d
 **Single-scan baseline: macro F1 = 0.7370.** `car` is the strongest class (F1
 0.874, most points per instance, most rigid/consistent signature); `two_wheeler` is
 the weakest (F1 0.625, sparsest class, easily confused with `car`/`pedestrian` at
-this point-count regime). This is the floor every multi-scan result below improves
+this point-count regime). This is the baseline every multi-scan result below improves
 on (Figure 4).
 
 ## 3. Motivation: why accumulate scans
@@ -155,38 +148,14 @@ on (Figure 4).
 - A single detection instance averaging ~2.9 points hits a hard ceiling regardless of
   encoder: histograms, explicit per-instance statistics (median, max, min, spread), and DeepReflecs' learned
   point-set network all converge to a similar macro F1 band on single-scan data
-  (Section 2). The bottleneck is point count, not model choice.
-- Beyond raw point count, a tracked object's radar signature evolves scan to scan:
-  a pedestrian's micro-Doppler shifts as limbs swing, and RCS fluctuates as an
-  object's dominant reflectors change with aspect angle. None of that is visible in
-  a single scan, motivating a sequence model over the per-scan embeddings (Section 5)
-  in addition to simply pooling more points.
-- A `track_id` persists across a tracked object's lifetime, multiple radar scans of
-  the *same* object, and all 4 sensors share one global clock. Pooling a track's last
-  N scans' points into one decision, instead of one scan's points, attacks sparsity
-  directly at the input level rather than trying to encode more out of the same few
-  points.
-- A second, independent factor: building a window from whichever sensor(s) are
-  actually detecting the track *right now* (cross-sensor handoff) gets more real
-  detections per track without needing more real time to pass, since a track is
-  often seen by 2-3 different sensors as it moves through overlapping fields of
-  view.
-- Coordinate frame: the car frame (`x_cc`/`y_cc`) rotates with ego heading and is unusable across scans; the
-  global odometry-corrected frame (`x_seq`/`y_seq`), recentered per scan on that
-  scan's own object centroid (`x_rel`/`y_rel` = `x_seq`/`y_seq` minus that scan's
-  own mean), is what actually goes into the model, bounded scan-to-scan instead of
-  drifting with the object's accumulated path.
+  (Section 2). The peformance is limited by point density.
+- In addition to point density, radar signatures evolve over time, such as micro-Doppler and RCS variations caused by changing aspect angles. Since a single scan cannot capture these temporal patterns,a sequence model over per-scan embeddings is used rather than relying solely on point accumulation (Section 5)."
+- A `track_id` persists across a tracked object's lifetime, multiple radar scans of the *same* object. Pooling a track's last N scans' points into one decision, instead of one scan's points, addresses sparsity directly at the input level rather than trying to encode more out of the same few points. Building the window from whichever sensor(s) are actually detecting the track right now (cross-sensor handoff) adds more real detections per track, since a track is often seen by 2-3 different sensors from multiple angles as it moves through overlapping fields of view.
+- Coordinate frame: the car frame (`x_cc`/`y_cc`) rotates with ego heading, so it can't be compared across scans. The model instead takes the global odometry-corrected frame (`x_seq`/`y_seq`), recentered on each scan's own object centroid (`x_rel`/`y_rel` = `x_seq`/`y_seq` minus that scan's mean), to avoid drif with the object's accumulated path.
 
 ## 4. Multi-scan baseline: naive pooling
 
-All points from a track's last `N=20` scans (all sensors) concatenated into **one**
-point set, classified by a single DeepReflecs instance trained end-to-end on the
-pooled data. No sequence model, no per-scan structure retained, no notion of which
-point came from which scan at all.
-
-In deployment this window is a per-track FIFO buffer: each new scan pushes in and
-the oldest one drops out, so the buffer always holds exactly the last N scans and a
-decision fires the moment a new scan arrives (Figure 5).
+A track's last `N=20` scans (all sensors) are concatenated into **one** point set and classified by a single DeepReflecs instance trained end-to-end. There is no sequence model and no per-scan structure. In deployment, the window is a per-track FIFO buffer: each new scan pushes in, the oldest drops out, and a decision fires on every new scan (Figure 5).
 
 
 ```python
@@ -297,13 +266,9 @@ display(Image(filename=str(RESULTS / "track_accumulation/N20_stride1_allsensors/
 
 **Figure 6.** Multi-scan pooled baseline (N=20, all sensors) confusion matrix, row-normalized.
 
-**Baseline: macro F1 = 0.8613**, +0.1243 over the single-scan floor from pooling
-alone, no new architecture. Weakest class is still `two_wheeler` (F1 0.813), but
-every class improved substantially over Section 2's single-scan numbers (Figure 6).
+**Baseline.** Pooling alone yields a macro F1 of 0.8613, a gain of 0.1243 over the single-scan floor, with no architectural change. `two_wheeler` remains the weakest class (F1 = 0.813), but all classes improve substantially relative to the single-scan results in Section 2 (Figure 6).
 
-Why pooling helps even on a near-static track: at ~2.9 points per scan, which scatterers cross the CFAR threshold is dominated by speckle (coherent fading), not just the object's geometry, so consecutive scans give largely independent noisy draws of the same object rather than redundant copies. Pooling N of them is variance reduction on the detection process (more points per class-defining statistic), plus some aspect-angle diversity from ego/relative motion; this report can't cleanly separate how much each contributes.
-
-One specific confusion drops a lot: two_wheeler misclassified as pedestrian falls from 8% (single scan) to 3% (pooled N=20), consistent with pooling resolving the two classes' overlapping point-count/RCS regime rather than just raising two_wheeler's overall recall uniformly.
+This result is consistent with the sparsity of individual scans. At roughly 2.9 points per scan, which scatterers exceed the CFAR threshold is determined largely by speckle (coherent fading) rather than by object geometry alone. Consecutive scans therefore behave as largely independent noisy samples of the same object, and pooling N of them reduces variance and adds some aspect-angle diversity from ego and relative motion. The clearest effect is in the `two_wheeler`/`pedestrian` confusion: the share of `two_wheeler` samples misclassified as `pedestrian` falls from 8% (single scan) to 3% (pooled, N=20). This suggests that pooling resolves the overlap between the two classes' point-count and RCS regimes, rather than uniformly raising `two_wheeler` recall.
 
 
 ```python
@@ -470,13 +435,9 @@ summary
 </table>
 </div>
 
+**Residual confusion (Figure 6).** The remaining 3% corresponds to 345 `two_wheeler` windows from the sparse, slow tail of the class. Compared with correctly classified `two_wheeler` windows, they contain about half the points, have a spatial extent closer to a pedestrian's, and have a median velocity of -0.14 m/s (versus +2.09 m/s), which is comparable to a walking pedestrian's +0.41 m/s.
 
-
-**Why the remaining 3% (Figure 6).** The 345 confused windows are two_wheeler's sparse, slow tail: half the points of a correctly classified two_wheeler window, a spatial extent shrunk toward pedestrian's, and a velocity of -0.14 m/s median (a correctly classified two_wheeler moves at +2.09 m/s) indistinguishable from a walking pedestrian's +0.41 m/s.
-
-Scan-to-scan dynamics (median per scan, diffed consecutively, normalized by real elapsed time, the project's own established `build_windowed_temporal_features`) confirm this isn't just a snapshot effect: vr temporal variation is 3.64 for confused windows vs. 4.51 for true pedestrian and 6.30 for correct two_wheeler, confused is still the quietest group scan-to-scan, not just at a single instant. RCS temporal variation is 94.7 for confused, close to true pedestrian's 88.6 and well below correct two_wheeler's 117.6. So the floor here holds on both axes once measured correctly: this reads as a stationary or near-stationary bike/rider, not just a snapshot that happens to look slow, consistent with the large_vehicle/car and pedestrian/pedestrian_group confusions discussed next for the fusion model (Figure 9).
-
-*(An earlier pass at this computed "dynamics" as a point-to-point diff across the raw pooled point array, which mixes within-scan spatial variation with across-scan temporal change and is confounded by point count. The velocity conclusion above happens to survive that error; the large_vehicle/car case below does not, see its note.)*
+Scan-to-scan dynamics agree. Using per-scan medians, differenced between consecutive scans and normalized by elapsed time (`build_windowed_temporal_features`), the temporal variation of `vr` is lowest for the confused windows (3.64, versus 4.51 for pedestrians and 6.30 for correct `two_wheeler` windows), so they are slow over time and not just at a single instant. RCS variation is 94.7, close to the pedestrian value of 88.6 and well below the 117.6 of correct `two_wheeler` windows. These windows therefore look like a stationary or near-stationary bike or rider, and the remaining 3% likely reflects ambiguity in the radar signal itself rather than a shortcoming of the model, consistent with the `large_vehicle`/`car` and `pedestrian`/`pedestrian_group` confusions discussed next for the fusion model (Figure 9).
 
 
 ```python
@@ -599,10 +560,7 @@ summary_lv
 </div>
 
 
-
-**Why large_vehicle confuses with car (Figure 6).** The 2411 confused windows have a quarter the points of a correctly classified large_vehicle, and a spatial extent *smaller* than a typical car's (diagonal 3.3 vs. car's 4.3, vs. 13.7 for a correctly classified large_vehicle), at longer range (36.2m vs. 26.9m correct, vs. 34.8m car). At longer range, fewer of a long vehicle's physically separated reflectors resolve into distinct detections, collapsing it toward a compact, car-sized point cloud regardless of its real length, the same range/resolution effect. Scan-to-scan dynamics (RCS/velocity, computed correctly) were also checked and add no clean story on top of this: velocity stays large_vehicle-like but RCS variation is unexpectedly elevated, an unresolved detail that doesn't change the conclusion below.
-
-
+**`large_vehicle` confused with `car` (Figure 6).** The 2411 confused windows contain about a quarter of the points of a correctly classified `large_vehicle` and have a spatial extent smaller than a typical car's (diagonal 3.3 versus 4.3 for `car` and 13.7 for correct `large_vehicle` windows). They also lie at longer range (36.2 m versus 26.9 m for correct windows and 34.8 m for `car`). At longer range, fewer of a long vehicle's separated reflectors resolve into distinct detections, so the point cloud collapses toward a compact, car-sized shape regardless of the vehicle's true length.
 ```python
 from sklearn.metrics import roc_auc_score
 import matplotlib.pyplot as plt
@@ -664,8 +622,7 @@ plt.show()
 ![png](results/final_report/final_report_22_1.png)
     
 
-
-RCS mean looked like a surviving cue at the median (2.33 confused vs. 2.50 correct large_vehicle vs. -0.55 car), but a median gap can look clean while distributions overlap heavily. None of the four candidate features, points/window, diagonal length, RCS mean, Doppler spread, clears a usable separability bar alone: AUC 0.58-0.65 across the board, with 83-88% of confused windows falling inside true car's own 10th-90th percentile range on every one of them. A large median gap does not imply a large single-feature AUC once distributions overlap this much. There's also an architecture reason RCS specifically is moot regardless: DeepReflecs never computes "mean RCS of the window" as a feature, it max-pools a learned per-point transform, so even a separable mean signal could be invisible to it.
+Mean RCS would be the natural cue for separating these classes: the median per-window mean RCS of confused windows (2.33) is close to that of correct `large_vehicle` windows (2.50) and far from that of `car` (-0.55). The question is therefore why the model still confuses the two. Medians alone are misleading here: the RCS mean panel above shows the two distributions almost fully overlapping, with the confused group's mass sitting inside car's own spread rather than forming a separate mode, so the median gap hides a histogram that looks nearly identical to car's. This is reflected in the AUC between confused `large_vehicle` windows and true `car` windows, which ranges from 0.58 to 0.65 across the four features examined (points per window, diagonal length, mean RCS, Doppler spread). Of the confused windows, 83-88% fall inside the 10th-90th percentile range of `car`, so no single feature separates them reliably.
 
 
 ```python
